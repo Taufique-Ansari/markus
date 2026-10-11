@@ -1833,6 +1833,8 @@ export const api = {
     openPath: (path: string) =>
       request<{ ok: boolean }>('/system/open-path', { method: 'POST', body: JSON.stringify({ path }) }),
     storage: () => request<StorageInfo>('/system/storage'),
+    // 只取部署常量（数据目录路径），不触发全目录扫描。需要路径、不需要体积明细时用它。
+    info: () => request<{ dataDir: string }>('/system/info'),
     orphans: () => request<OrphanInfo>('/system/storage/orphans'),
     purgeOrphans: (ids?: string[]) => request<PurgeResult>('/system/storage/orphans', {
       method: 'DELETE',

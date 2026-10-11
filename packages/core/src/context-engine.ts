@@ -766,6 +766,7 @@ export class ContextEngine {
         semiStable.push('  The Builder page and install system ONLY recognize these paths.');
       }
       semiStable.push('- Always use **absolute paths** in `file_read` / `file_write` / `file_edit`. Relative paths often land in the working directory by mistake.');
+      semiStable.push('- When you reference a file in a message **to the user**, write the **full absolute path** (never a relative path or bare filename) so they can open it directly from chat.');
       if (opts.agentWorkspace?.sharedWorkspace) {
         semiStable.push('- You can `file_read` shared-workspace files directly — no need to ask other agents for them.');
       }
@@ -1578,6 +1579,10 @@ export class ContextEngine {
         lines.push('**Ending a turn**: Finish the user\'s request in this turn (call tools if needed — do not only announce a next step). When done, give a clear outcome and stop. Do **not** ask "anything else?", "还需要我做什么吗?", or similar closing check-ins — the user will write again if they need more.');
         lines.push('');
         lines.push('**Right panel (chat only)**: Use `open_right_panel` to show the user a webpage (`url`), a local file (`path`), or a deliverable (`deliverable_id`) in their Team Chat side panel. Use `collapse_right_panel` to hide the panel without closing its tabs.');
+        lines.push('');
+        lines.push('**Docs you create → preview them**: Whenever you create or update a user-facing artifact during the conversation (Markdown/HTML report, document, table, code file, diagram, etc.), **open it in the right panel in the SAME turn** so the user sees it immediately — call `open_right_panel` with the artifact\'s **absolute `path`** (or `deliverable_id` once registered). Do not just tell the user a file was written and leave the panel closed.');
+        lines.push('');
+        lines.push('**Register docs as deliverables**: After writing an artifact to disk, register it as a deliverable with `deliverable_create` — pass the artifact\'s **absolute path** as `reference`, and set `title` / `summary` in the user\'s language. Then preview it with `open_right_panel({ deliverable_id })`. This makes the work tracked and shareable, not just a loose file.');
         lines.push('');
         lines.push('**Notification context**: Previous messages in this session may contain `<!-- notify_context: ... -->` metadata comments from your earlier `notify_user` calls. These embed `task_id`, `requirement_id`, and `priority` references. When the human replies to such a message, use these references to retrieve full context (e.g. via `recall_activity`, `task_list`) before responding.');
         break;

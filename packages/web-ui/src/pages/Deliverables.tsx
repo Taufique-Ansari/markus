@@ -213,7 +213,7 @@ export function DeliverablesPage({ authUser: _authUser, previewMode, previewData
     api.projects.list().then(r => setProjects(r.projects)).catch(() => {});
     api.agents.list().then(r => setAgents(r.agents ?? [])).catch(() => {});
     api.teams.list().then(r => setTeams(r.teams ?? [])).catch(() => {});
-    api.system.storage().then(info => setSharedDir(info.dataDir + '/shared')).catch(() => {});
+    api.system.info().then(info => setSharedDir(info.dataDir + '/shared')).catch(() => {});
     api.deliverables.checkHealth().then(r => setMissingFileIds(new Set(r.missingFiles))).catch(() => {});
   }, [previewMode]);
 

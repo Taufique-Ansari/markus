@@ -208,7 +208,6 @@ export function HomePage({ authUser, previewMode, previewData }: { authUser?: { 
       }
       setRecentDeliverables([...seen.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 6));
     }).catch(() => {});
-    api.system.storage().then(setStorageInfo).catch(() => {});
     api.usage.summary().then(d => setUsageInfo(d.usage)).catch(() => {});
     api.cu.status().then(setCuQuota).catch(() => {});
     const llmP = api.settings.getLlm().then(d => {
@@ -240,6 +239,13 @@ export function HomePage({ authUser, previewMode, previewData }: { authUser?: { 
       setChecklistReady(true);
     });
   }, [opsPeriod, uid]);
+
+  // 存储概览只被「健康」弹窗用到（storageInfo.totalSize）。以前挂在挂载时就拉——
+  // 一次 ~1s 的全目录扫描，而用户不一定会打开这个弹窗。改为打开弹窗时才拉。
+  useEffect(() => {
+    if (!showHealthModal || storageInfo) return;
+    api.system.storage().then(setStorageInfo).catch(() => {});
+  }, [showHealthModal, storageInfo]);
 
   // 引导清单全部完成（或用户明确 dismiss 且必做 setup 已完成）→ 持久化「不再显示」。
   // 写服务端 preferences.guideHidden，保证换浏览器/清缓存也永久隐藏；本地缓存兜底离线。

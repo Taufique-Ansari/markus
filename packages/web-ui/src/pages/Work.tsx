@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback, useMemo, useRef, type DragEvent, type
 import { useTranslation } from 'react-i18next';
 import { api, wsClient, ApiError, invalidateApiCache, type ProjectInfo, type TaskInfo, type AgentInfo, type TaskLogEntry, type TaskComment, type RequirementComment, type RequirementInfo, type HumanUserInfo, type RoundSummary, type AuthUser, type ActivityRecord, type StatusTransitionInfo, type WorkflowInfo, type WorkflowRunInfo, type WorkflowTemplateInfo } from '../api.ts';
 import { ConfirmModal } from '../components/ConfirmModal.tsx';
-import { MemoExecEntryRow, ThinkingDots, StreamingText, filterCompletedStarts, streamEntryToExecEntry, attachSubagentLogsToEntries, FullExecutionLog, CompactExecutionCard, type ExecEntry, type ExecutionStreamEntryUI } from '../components/ExecutionTimeline.tsx';
+import { ThinkingDots, StreamingText, filterCompletedStarts, streamEntryToExecEntry, FullExecutionLog, CompactExecutionCard, type ExecEntry, type ExecutionStreamEntryUI } from '../components/ExecutionTimeline.tsx';
+import { ProcessTimeline } from './ChatComponents.tsx';
 import { taskLogToStreamEntry, activityLogToStreamEntry, type AgentActivityLogEntry } from '../api.ts';
 import { MarkdownMessage } from '../components/MarkdownMessage.tsx';
 import { ContentRenderer } from '../components/ContentRenderer.tsx';
@@ -1288,6 +1289,72 @@ function TaskActivitySection({ task, agents, users, authUser }: {
   );
 }
 
+// ─── Task log timeline (collapsed process runs, Team-Chat style) ───────────────
+//
+// Task execution logs used to render every entry flat — dense to read. We reuse
+// the shared ProcessTimeline (same primitives as the Team Chat bubble): contiguous
+// thinking/tool entries fold into ONE collapsible ProcessRun row (click to expand),
+// while body text renders inline as markdown. Comments stay interleaved
+// chronologically (they need avatar/agents context, so they are not part of the
+// shared component).
+function TaskLogTimeline({
+  entries, comments, agents, isExecuting,
+}: {
+  entries: ExecutionStreamEntryUI[];
+  comments: TaskComment[];
+  agents: AgentInfo[];
+  isExecuting: boolean;
+}) {
+  type Item =
+    | { kind: 'entry'; entry: ExecutionStreamEntryUI; ts: number }
+    | { kind: 'comment'; comment: TaskComment; ts: number };
+
+  // Merge entries + comments into one chronological stream.
+  const items = useMemo<Item[]>(() => {
+    const merged: Item[] = [
+      ...entries.map(e => ({ kind: 'entry' as const, entry: e, ts: e.createdAt ? new Date(e.createdAt).getTime() : 0 })),
+      ...comments.map(c => ({ kind: 'comment' as const, comment: c, ts: new Date(c.createdAt).getTime() })),
+    ];
+    merged.sort((a, b) => a.ts - b.ts);
+    return merged;
+  }, [entries, comments]);
+
+  // Split into units: a run of consecutive entries renders through ProcessTimeline
+  // (process runs collapse); comments render as-is between runs.
+  const units = useMemo(() => {
+    const out: Array<
+      | { kind: 'entries'; key: string; entries: ExecutionStreamEntryUI[] }
+      | { kind: 'comment'; key: string; comment: TaskComment }
+    > = [];
+    let run: ExecutionStreamEntryUI[] = [];
+    const flush = () => {
+      if (run.length === 0) return;
+      out.push({ kind: 'entries', key: `entries-${out.length}`, entries: run });
+      run = [];
+    };
+    items.forEach(it => {
+      if (it.kind === 'comment') {
+        flush();
+        out.push({ kind: 'comment', key: `c-${it.comment.id}`, comment: it.comment });
+      } else {
+        run.push(it.entry);
+      }
+    });
+    flush();
+    return out;
+  }, [items]);
+
+  return (
+    <>
+      {units.map(u => u.kind === 'comment' ? (
+        <CommentBubble key={u.key} comment={u.comment} agents={agents} />
+      ) : (
+        <ProcessTimeline key={u.key} entries={u.entries} isStreaming={isExecuting} />
+      ))}
+    </>
+  );
+}
+
 // ─── Execution Log Panel ────────────────────────────────────────────────────────
 
 function TaskExecutionLogs({ task, isRunning, authUser, agents }: { task: TaskInfo; isRunning: boolean; authUser?: { id: string; name: string }; agents: AgentInfo[] }) {
@@ -1649,28 +1716,15 @@ function TaskExecutionLogs({ task, isRunning, authUser, agents }: { task: TaskIn
     );
   }
 
-  // Single round — render log entries with comments interleaved chronologically
+  // Single round — body text inline, thinking/tool calls folded into collapsible
+  // process rows (Team-Chat style), comments interleaved chronologically.
   if (!hasMultipleRounds) {
-    const exec = streamEntries.map(e => streamEntryToExecEntry(e)).filter((e): e is ExecEntry => e !== null);
-    const filtered = attachSubagentLogsToEntries(allLoadedLogs, filterCompletedStarts(exec));
-
-    type TimelineItem = { kind: 'entry'; entry: ExecEntry; ts: number } | { kind: 'comment'; comment: TaskComment; ts: number };
-    const timeline: TimelineItem[] = [
-      ...filtered.map(e => ({ kind: 'entry' as const, entry: e, ts: e.timestamp ? new Date(e.timestamp).getTime() : 0 })),
-      ...comments.map(c => ({ kind: 'comment' as const, comment: c, ts: new Date(c.createdAt).getTime() })),
-    ];
-    timeline.sort((a, b) => a.ts - b.ts);
-
     return (
       <div className="flex flex-col min-h-full">
-        <div className="px-4 py-3 flex-1 space-y-0.5">
-          {timeline.map((item, i) =>
-            item.kind === 'comment'
-              ? <CommentBubble key={`c-${item.comment.id}`} comment={item.comment} agents={agents} />
-              : <MemoExecEntryRow key={`e-${i}`} entry={item.entry} showTime isLast={i === timeline.length - 1} />
-          )}
+        <div className="px-4 py-3 flex-1 space-y-2">
+          <TaskLogTimeline entries={streamEntries} comments={comments} agents={agents} isExecuting={isExecuting} />
           {isExecuting && streamingText && <StreamingText content={streamingText} />}
-          {isExecuting && !streamingText && filtered.length > 0 && <ThinkingDots />}
+          {isExecuting && !streamingText && streamEntries.length > 0 && <ThinkingDots />}
         </div>
         {commentInput}
       </div>
@@ -1747,23 +1801,14 @@ function TaskExecutionLogs({ task, isRunning, authUser, agents }: { task: TaskIn
               {isExpanded && (
                 <div className="px-3 py-1.5 space-y-0.5">
                   {isLoading && <div className="text-xs text-fg-tertiary py-2 text-center">{t('work:task.loadingRound', { n: rs.round })}</div>}
-                  {logs && (() => {
-                    const entries = logs.map(l => taskLogToStreamEntry(l));
-                    const exec = entries.map(e => streamEntryToExecEntry(e)).filter((e): e is ExecEntry => e !== null);
-                    const filtered = attachSubagentLogsToEntries(logs, filterCompletedStarts(exec));
-
-                    type TimelineItem = { kind: 'entry'; entry: ExecEntry; ts: number } | { kind: 'comment'; comment: TaskComment; ts: number };
-                    const tl: TimelineItem[] = [
-                      ...filtered.map(e => ({ kind: 'entry' as const, entry: e, ts: e.timestamp ? new Date(e.timestamp).getTime() : 0 })),
-                      ...roundComments.map(c => ({ kind: 'comment' as const, comment: c, ts: new Date(c.createdAt).getTime() })),
-                    ];
-                    tl.sort((a, b) => a.ts - b.ts);
-                    return tl.map((item, i) =>
-                      item.kind === 'comment'
-                        ? <CommentBubble key={`c-${item.comment.id}`} comment={item.comment} agents={agents} />
-                        : <MemoExecEntryRow key={`e-${i}`} entry={item.entry} showTime isLast={i === tl.length - 1} />
-                    );
-                  })()}
+                  {logs && (
+                    <TaskLogTimeline
+                      entries={logs.map(l => taskLogToStreamEntry(l))}
+                      comments={roundComments}
+                      agents={agents}
+                      isExecuting={isLatest && isExecuting}
+                    />
+                  )}
                   {isLatest && isExecuting && streamingText && <StreamingText content={streamingText} />}
                   {isLatest && isExecuting && !streamingText && !isLoading && <ThinkingDots />}
                 </div>
@@ -3467,6 +3512,93 @@ function TagPicker({ value, options, onSelect, allowedValues }: {
   );
 }
 
+// ─── Quick add row (inline idea capture at the bottom of the todo group) ───────
+//
+// Fast capture of a fledgling thought: pick the type with the leading badge, type
+// a title, hit Enter. Requirements are created in place (an idea IS a requirement,
+// and humans create auto-approved requirements) — the description is seeded with
+// the title so nothing but the idea itself is required. Tasks, however, must carry
+// an assignee + reviewer to be actionable, so we open the full create dialog with
+// the title pre-filled rather than create a half-specified task.
+function QuickAddRow({
+  onQuickCreateReq, onQuickCreateTask,
+}: {
+  onQuickCreateReq: (title: string) => void;
+  onQuickCreateTask: (title: string) => void;
+}) {
+  const { t } = useTranslation(['work', 'common']);
+  const [type, setType] = useState<'req' | 'task'>('req');
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+  const rowRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!editing) return;
+    // Focus WITHOUT the browser's native scroll-into-view. This row lives inside the
+    // horizontally scrollable backlog table, and the default focus scroll aligns the
+    // input's left edge to the viewport — sliding the table's left content out from
+    // under the sidebar. preventScroll keeps the current scroll position untouched.
+    inputRef.current?.focus({ preventScroll: true });
+    // Then deliberately reveal the row from its START (type badges + input) so the
+    // capture affordance is fully visible regardless of where the table was scrolled.
+    // `inline: 'start'` is required: the row is wider than the viewport, so the default
+    // `nearest` treats it as already visible and does nothing.
+    rowRef.current?.scrollIntoView({ block: 'nearest', inline: 'start' });
+  }, [editing]);
+
+  const submit = () => {
+    const title = value.trim();
+    setValue('');
+    setEditing(false);
+    if (!title) return;
+    if (type === 'req') onQuickCreateReq(title);
+    else onQuickCreateTask(title);
+  };
+
+  return (
+    <div ref={rowRef} className="flex items-center gap-2 px-3 md:px-6 py-2.5 md:py-2 border-l-2 border-l-transparent hover:bg-surface-elevated/30 transition-colors">
+      <div className="flex items-center gap-1 shrink-0">
+        {/* onMouseDown- preventDefault: switching the type must not blur the input,
+            otherwise onBlur fires submit() and creates an item in the wrong type. */}
+        <button
+          type="button"
+          onMouseDown={e => e.preventDefault()}
+          onClick={() => setType('req')}
+          className={`text-[9px] px-1.5 py-0.5 rounded font-semibold transition-colors ${type === 'req' ? 'bg-amber-500/20 text-amber-600' : 'bg-surface-elevated text-fg-tertiary hover:text-fg-secondary'}`}
+        >{t('work:task.requirementShort')}</button>
+        <button
+          type="button"
+          onMouseDown={e => e.preventDefault()}
+          onClick={() => setType('task')}
+          className={`text-[9px] px-1.5 py-0.5 rounded font-semibold transition-colors ${type === 'task' ? 'bg-brand-500/20 text-brand-600' : 'bg-surface-elevated text-fg-tertiary hover:text-fg-secondary'}`}
+        >{t('work:task.taskShort')}</button>
+      </div>
+      {editing ? (
+        <input
+          ref={inputRef}
+          value={value}
+          onChange={e => setValue(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === 'Enter') submit();
+            else if (e.key === 'Escape') { setValue(''); setEditing(false); }
+          }}
+          onBlur={submit}
+          placeholder={t('work:task.quickAddPlaceholder')}
+          // text-base (16px) on mobile prevents iOS Safari's focus auto-zoom.
+          className="flex-1 min-w-0 bg-transparent border-none outline-none text-base md:text-xs text-fg-primary placeholder:text-fg-tertiary"
+        />
+      ) : (
+        <button
+          type="button"
+          onClick={() => setEditing(true)}
+          className="flex-1 min-w-0 text-left text-base md:text-xs text-fg-tertiary hover:text-fg-secondary truncate"
+        >＋ {t('work:task.quickAddHint')}</button>
+      )}
+    </div>
+  );
+}
+
 function BacklogRowView({ row, idx, dragIdx, agentMap, projMap, onTaskClick, onReqClick, onRowDragStart, onRowDragEnd, handleStatusChange, handlePriorityChange, selected, isMobile, isAbnormalBlocked }: {
   row: BacklogRow; idx: number; dragIdx: number | null;
   agentMap: Map<string, AgentInfo>; projMap: Map<string, ProjectInfo>;
@@ -3600,7 +3732,7 @@ function BacklogRowView({ row, idx, dragIdx, agentMap, projMap, onTaskClick, onR
   );
 }
 
-function BacklogTable({ tasks, requirements, agents, projects, onTaskClick, onReqClick, onRefresh, selectedTaskId, selectedReqId }: {
+function BacklogTable({ tasks, requirements, agents, projects, onTaskClick, onReqClick, onRefresh, selectedTaskId, selectedReqId, onQuickCreateReq, onQuickCreateTask }: {
   tasks: TaskInfo[];
   requirements: RequirementInfo[];
   agents: AgentInfo[];
@@ -3610,6 +3742,8 @@ function BacklogTable({ tasks, requirements, agents, projects, onTaskClick, onRe
   onRefresh: () => void;
   selectedTaskId?: string | null;
   selectedReqId?: string | null;
+  onQuickCreateReq: (title: string) => void;
+  onQuickCreateTask: (title: string) => void;
 }) {
   const { t } = useTranslation(['work', 'common']);
   const isMobile = useIsMobile();
@@ -3791,6 +3925,10 @@ function BacklogTable({ tasks, requirements, agents, projects, onTaskClick, onRe
                 {groupRows.map(row => (
                   <BacklogRowView key={`${row.kind}-${row.data.id}`} row={row} idx={rowIndexMap.get(row) ?? 0} dragIdx={dragIdx} agentMap={agentMap} projMap={projMap} onTaskClick={onTaskClick} onReqClick={onReqClick} onRowDragStart={onRowDragStart} onRowDragEnd={onRowDragEnd} handleStatusChange={handleStatusChange} handlePriorityChange={handlePriorityChange} selected={row.kind === 'task' ? row.data.id === selectedTaskId : row.data.id === selectedReqId} isMobile={isMobile} isAbnormalBlocked={row.kind === 'task' ? checkAbnormalBlocked(row.data) : false} />
                 ))}
+                {/* Quick-capture placeholder — pinned to the bottom of the 待办 group. */}
+                {groupId === 'todo' && (
+                  <QuickAddRow onQuickCreateReq={onQuickCreateReq} onQuickCreateTask={onQuickCreateTask} />
+                )}
               </div>
             );
           })
@@ -4787,6 +4925,37 @@ export function WorkPage({ authUser, previewMode, previewData }: { authUser?: Au
     setReqProjectId(selectedProjectId ?? '');
     setShowCreateReq(true);
   }, [selectedProjectId]);
+
+  // Quick capture from the todo-group placeholder row.
+  // A requirement is an idea and humans create auto-approved requirements, so we
+  // create it in place (seed the description with the title). A task needs an
+  // assignee + reviewer, so we pre-fill the create dialog instead of creating a
+  // half-specified task.
+  const handleQuickCreateReq = async (title: string) => {
+    if (!selectedProjectId) {
+      // No project in scope → fall back to the full dialog with the title pre-filled.
+      setReqTitle(title);
+      openCreateReq();
+      return;
+    }
+    try {
+      const { requirement } = await api.requirements.create({
+        title, description: title, priority: 'medium', projectId: selectedProjectId,
+      });
+      msg(t('work:task.quickAddReqDone', { title }));
+      refreshRequirements();
+      if (requirement) forceOpenReq(requirement);
+    } catch (e) {
+      msg(t('work:task.errorGeneric', { message: String(e) }));
+    }
+  };
+
+  const handleQuickCreateTask = (title: string) => {
+    setTaskTitle(title);
+    setTaskProjectId(selectedProjectId ?? '');
+    setShowCreateTask(true);
+    msg(t('work:task.quickAddTaskHint'));
+  };
 
   // Create modals
   const [showCreateProject, setShowCreateProject] = useState(false);
@@ -6295,6 +6464,8 @@ export function WorkPage({ authUser, previewMode, previewData }: { authUser?: Au
             onRefresh={() => { refreshBoard(); refreshRequirements(); }}
             selectedTaskId={selectedTask?.id}
             selectedReqId={selectedReq?.id}
+            onQuickCreateReq={handleQuickCreateReq}
+            onQuickCreateTask={handleQuickCreateTask}
           />
           </div>
         ) : boardType === 'workflows' ? (

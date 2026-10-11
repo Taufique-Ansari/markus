@@ -4,7 +4,7 @@ import { readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync, rmSync
 import { gzipSync } from 'node:zlib';
 import { homedir } from 'node:os';
 import { execSync } from 'node:child_process';
-import { createLogger, generateId, userId as genUserId, resolveJwtSecret, resolveInitialAdminPassword, initialAdminPasswordFile, clearInitialAdminPassword, kebab, saveConfig, loadConfig, setEnvValue, unsetEnvValue, getTextContent, stripInternalBlocks, extractThinkBlocks, APP_VERSION, checkForUpdate, buildManifest, manifestFilename, CHANNEL_CONTEXT_MESSAGES, SESSION_RESTORE_MAX_MESSAGES, PROVIDERS, getProviderBootstrapModel, pickOrgSecretary, type TaskStatus, type TaskPriority, type TaskSortField, type SortOrder, type PackageType, type RequirementStatus, type IntegrationConfig, type UserInputAnswer, type AgentActivity } from '@markus/shared';
+import { createLogger, generateId, userId as genUserId, resolveJwtSecret, resolveInitialAdminPassword, initialAdminPasswordFile, clearInitialAdminPassword, kebab, saveConfig, loadConfig, setEnvValue, unsetEnvValue, markusHome, getTextContent, stripInternalBlocks, extractThinkBlocks, APP_VERSION, checkForUpdate, buildManifest, manifestFilename, CHANNEL_CONTEXT_MESSAGES, SESSION_RESTORE_MAX_MESSAGES, PROVIDERS, getProviderBootstrapModel, pickOrgSecretary, type TaskStatus, type TaskPriority, type TaskSortField, type SortOrder, type PackageType, type RequirementStatus, type IntegrationConfig, type UserInputAnswer, type AgentActivity } from '@markus/shared';
 import {
   GatewayError,
   WorkflowEngine,
@@ -11817,6 +11817,13 @@ EXPLANATION_END`;
       return;
     }
 
+    if (path === '/api/system/info' && req.method === 'GET') {
+      // 只回部署常量（数据目录路径），**不**触发 org 级目录扫描。
+      // 只想要这个路径的调用方用它——不为了拿一个常量付一次全目录遍历的代价。
+      this.json(res, 200, { dataDir: markusHome() });
+      return;
+    }
+
     if (path === '/api/system/storage' && req.method === 'GET') {
       try {
         const dataDir = join(homedir(), '.markus');
@@ -13447,6 +13454,7 @@ EXPLANATION_END`;
       exact('/api/browser/tab-ownership', 'GET'),
       exact('/api/terminal/session-ownership', 'GET'),
       exact('/api/system/storage', 'GET'),
+      exact('/api/system/info', 'GET'),
       exact('/api/system/storage/orphans', 'GET', 'DELETE'),
       exact('/api/system/announcements', 'GET', 'POST'),
       exact('/api/system/open-path', 'POST'),

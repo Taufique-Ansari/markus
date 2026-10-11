@@ -333,6 +333,16 @@ describe('lastTextBlockIndex / collapsibleBlockCount — 折叠边界', () => {
       block('process', 'p'), block('text', 'a'),
     ] as never, false)).toBe(1);
   });
+
+  it('中断/异常结束 → 不折叠，完整展示整个过程', async () => {
+    const { collapsibleBlockCount } = await import('./ChatComponents.tsx');
+    // 「过程 + 正文 + 过程 + 正文」正常结束会折前 3 块；中断时一块都不折。
+    const blocks = [
+      block('process', 'p1'), block('text', 'a'), block('process', 'p2'), block('text', 'b'),
+    ];
+    expect(collapsibleBlockCount(blocks as never, false)).toBe(3);
+    expect(collapsibleBlockCount(blocks as never, false, true)).toBe(0);
+  });
 });
 
 describe('formatWorkedFor — 「已工作」文案', () => {

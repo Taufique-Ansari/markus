@@ -880,18 +880,39 @@ export function TeamPage({ initialAgentId, authUser, previewMode, previewData }:
   // Message ids currently represented by a bottom notify card — hide the duplicate bubble.
   const [hiddenNotifyMsgIds, setHiddenNotifyMsgIds] = useState<string[]>([]);
   const [openSessionTabs, _setOpenSessionTabs] = useState<ChatSessionInfo[]>([]);
-  // Wrapper that deduplicates tabs by ID to prevent duplicate "main session" entries
+  // Wrapper that deduplicates tabs by ID (to prevent duplicate "main session"
+  // entries) AND pins the main session to the first position — the main tab is
+  // the stable anchor, so it must always stay visible at the head of the strip.
   const setOpenSessionTabs: typeof _setOpenSessionTabs = (action) => {
     _setOpenSessionTabs(prev => {
       const next = typeof action === 'function' ? action(prev) : action;
       const seen = new Set<string>();
-      return next.filter(t => {
+      const deduped = next.filter(t => {
         if (seen.has(t.id)) return false;
         seen.add(t.id);
         return true;
       });
+      // Stable partition: main first, then the rest in their original order.
+      return deduped.some(t => t.isMain)
+        ? [...deduped.filter(t => t.isMain), ...deduped.filter(t => !t.isMain)]
+        : deduped;
     });
   };
+  // Session tab strip: keep the active tab scrolled into view.
+  const sessionTabBarRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!activeSessionId) return;
+    const bar = sessionTabBarRef.current;
+    if (!bar) return;
+    const el = bar.querySelector<HTMLElement>(
+      `[data-session-tab-id="${CSS.escape(activeSessionId)}"]`,
+    );
+    if (!el) return;
+    const id = requestAnimationFrame(() => {
+      el.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [activeSessionId, openSessionTabs.length]);
   const historyBtnRef = useRef<HTMLButtonElement>(null);
   const historyPanelRef = useRef<HTMLDivElement>(null);
 
@@ -4933,7 +4954,7 @@ export function TeamPage({ initialAgentId, authUser, previewMode, previewData }:
               // dot disappears while the agent is visibly still typing.
               || (s.id === activeSessionId && hasStreamingTail(messages));
             return (
-            <div className="flex items-center gap-0 px-3 overflow-x-auto scrollbar-hide">
+            <div ref={sessionTabBarRef} className="flex items-center gap-0 px-3 overflow-x-auto scrollbar-hide">
               {openSessionTabs.map(s => {
                 // 完整标题同时用作原生 hover tooltip：tab 自身在 max-w-[180px]
                 // 处截断，只有悬停才能看全。
@@ -4941,6 +4962,7 @@ export function TeamPage({ initialAgentId, authUser, previewMode, previewData }:
                 return (
                 <div
                   key={s.id}
+                  data-session-tab-id={s.id}
                   title={sessionTabTooltip(s, t)}
                   className={`group flex items-center gap-1.5 px-3 py-1.5 text-xs cursor-pointer rounded-md transition-colors shrink-0 max-w-[180px] ${
                     s.id === activeSessionId
