@@ -7,12 +7,12 @@
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { execSync } from 'node:child_process';
-import { join } from 'node:path';
-import { homedir, platform } from 'node:os';
+import { platform } from 'node:os';
+import { markusConfigPath } from '@markus/shared';
 
 function readNetworkConfig(): { proxy?: string; proxyEnabled?: boolean } {
   try {
-    const configPath = join(homedir(), '.markus', 'markus.json');
+    const configPath = markusConfigPath();
     if (!existsSync(configPath)) return {};
     const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
     return {

@@ -8,6 +8,10 @@ import { signToken } from '../src/middleware/auth.js';
 
 const mockFetch = vi.fn();
 
+/** A real (non-placeholder) test signing key. Must differ from the shipped dev
+ *  default, which resolveJwtSecret() now rejects. */
+const TEST_JWT_SECRET = 'test-jwt-secret-do-not-ship-0123456789abcdef';
+
 // ── T7 登录多用户修复：hub-token per-user 隔离 + 多用户许可路径 ───────────
 // 根因（T6）：/api/settings/hub-token GET 无鉴权返回实例全局 token，前端自动
 // 恢复 + ensureHubAuth 短路 → 局域网设备以电脑身份进入。
@@ -23,11 +27,14 @@ describe('T7 hub-token per-user auth & multi-user path', () => {
     vi.stubGlobal('fetch', mockFetch);
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(console, 'log').mockImplementation(() => {});
-    // 钉住默认 JWT secret —— 避免全量跑时被其他测试文件污染的
+    // 钉住测试用 JWT secret —— 避免全量跑时被其他测试文件污染的
     // process.env['JWT_SECRET'] 导致验签不一致（cookie 401）。
+    // 注意：必须使用一个「非开发占位符」的真实 secret —— resolveJwtSecret()
+    // 会拒绝 'markus-dev-secret-change-in-prod' 并回退到随机持久化密钥，
+    // 那样 signToken 与 verifyToken 就会不一致。
     // 用 vi.stubEnv（vitest 官方 env 隔离）替代裸 process.env 赋值，
     // afterEach 里配合 vi.unstubAllEnvs() 彻底恢复，消除跨文件串扰。
-    vi.stubEnv('JWT_SECRET', 'markus-dev-secret-change-in-prod');
+    vi.stubEnv('JWT_SECRET', TEST_JWT_SECRET);
     vi.stubEnv('AUTH_ENABLED', 'true');
     mockFetch.mockResolvedValue({
       status: 200, ok: true,
@@ -49,7 +56,7 @@ describe('T7 hub-token per-user auth & multi-user path', () => {
   const authCookie = async (userId: string, role = 'owner', orgId = 'default') => {
     const token = await signToken(
       { userId, orgId, role, exp: Math.floor(Date.now() / 1000) + 3600 },
-      process.env['JWT_SECRET'] ?? 'markus-dev-secret-change-in-prod'
+      process.env['JWT_SECRET'] ?? TEST_JWT_SECRET
     );
     return { cookie: `markus_token=${token}` };
   };

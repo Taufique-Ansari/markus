@@ -4,7 +4,7 @@ import { readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync, rmSync
 import { gzipSync } from 'node:zlib';
 import { homedir } from 'node:os';
 import { execSync } from 'node:child_process';
-import { createLogger, generateId, userId as genUserId, kebab, saveConfig, loadConfig, getTextContent, stripInternalBlocks, extractThinkBlocks, APP_VERSION, checkForUpdate, buildManifest, manifestFilename, CHANNEL_CONTEXT_MESSAGES, SESSION_RESTORE_MAX_MESSAGES, PROVIDERS, getProviderBootstrapModel, pickOrgSecretary, type TaskStatus, type TaskPriority, type TaskSortField, type SortOrder, type PackageType, type RequirementStatus, type IntegrationConfig, type UserInputAnswer, type AgentActivity } from '@markus/shared';
+import { createLogger, generateId, userId as genUserId, resolveJwtSecret, resolveInitialAdminPassword, initialAdminPasswordFile, clearInitialAdminPassword, kebab, saveConfig, loadConfig, setEnvValue, unsetEnvValue, getTextContent, stripInternalBlocks, extractThinkBlocks, APP_VERSION, checkForUpdate, buildManifest, manifestFilename, CHANNEL_CONTEXT_MESSAGES, SESSION_RESTORE_MAX_MESSAGES, PROVIDERS, getProviderBootstrapModel, pickOrgSecretary, type TaskStatus, type TaskPriority, type TaskSortField, type SortOrder, type PackageType, type RequirementStatus, type IntegrationConfig, type UserInputAnswer, type AgentActivity } from '@markus/shared';
 import {
   GatewayError,
   WorkflowEngine,
@@ -501,14 +501,14 @@ export class APIServer {
         searchUrl?: string;
         workerEnabled?: boolean;
       } | undefined;
-      if (!markus?.apiKey && !markus?.subscriptionKey) return markus?.modelsUrl;
+      const resolvedKey = this.resolveMarkusOrKey(markus);
+      if (!markus) return undefined;
+      if (!resolvedKey && !markus.subscriptionKey) return markus.modelsUrl;
 
       const hubBase = (cfg.hub?.url || this.hubUrl || '').replace(/\/+$/, '');
       let modelsUrl = markus.modelsUrl?.trim() || '';
       let baseUrl = markus.baseUrl?.trim() || '';
-      let apiKey = markus.apiKey?.trim() || '';
-      // Prefer sk-or-; never treat legacy markus_* subscription as OR apiKey.
-      if (apiKey && /^markus[_-]/i.test(apiKey)) apiKey = '';
+      const apiKey = resolvedKey;
       let changed = false;
 
       if (!modelsUrl && hubBase) {
@@ -544,11 +544,17 @@ export class APIServer {
       if (markus.subscriptionKey || markus.proxyUrl || markus.searchUrl || markus.workerEnabled !== undefined) {
         changed = true;
       }
-      if (apiKey !== (markus.apiKey?.trim() || '')) changed = true;
+      // A legacy plaintext key on disk must be migrated to the secret store.
+      if (markus.apiKey?.trim()) changed = true;
 
       if (changed) {
-        const next: Record<string, string> = {};
-        if (apiKey) next.apiKey = apiKey;
+        const next: Record<string, unknown> = {};
+        // Secret → canonical store; config keeps only the reference.
+        if (apiKey) {
+          setEnvValue(APIServer.MARKUS_OR_ENV, apiKey);
+          next.apiKeyEnv = APIServer.MARKUS_OR_ENV;
+        }
+        next.apiKey = null; // drop any legacy plaintext from disk
         if (baseUrl) next.baseUrl = baseUrl;
         if (modelsUrl) next.modelsUrl = modelsUrl;
         if (markus.model) next.model = markus.model;
@@ -622,6 +628,45 @@ export class APIServer {
   }
 
   /** Legacy Worker-era keys look like `markus_<hex>`; OpenRouter keys start with `sk-or-`. */
+  /** Canonical env var name for a provider's API key (from PROVIDERS metadata). */
+  private providerEnvKey(providerName: string): string {
+    const meta = (PROVIDERS as Array<{ id: string; envKey?: string }>).find((p) => p.id === providerName);
+    return meta?.envKey ?? `${providerName.toUpperCase().replace(/-/g, '_')}_API_KEY`;
+  }
+
+  /**
+   * Persist a provider API key to the canonical secret store (`~/.markus/.env`)
+   * and return the env var name it now lives under. Secrets are NEVER written to
+   * markus.json — callers store `apiKeyEnv: <name>` and drop `apiKey`.
+   */
+  private persistProviderSecret(providerName: string, apiKey: string): string {
+    const envKey = this.providerEnvKey(providerName);
+    setEnvValue(envKey, apiKey);
+    return envKey;
+  }
+
+  /** Canonical env var holding the Markus Cloud (OpenRouter) member key. */
+  private static readonly MARKUS_OR_ENV = 'MARKUS_OPENROUTER_KEY';
+
+  /**
+   * Resolve the Markus-Cloud OpenRouter key. The canonical secret store
+   * (`~/.markus/.env`, loaded into process.env) wins; a legacy plaintext
+   * `markus.apiKey` on disk is a read-only compat fallback.
+   */
+  private resolveMarkusOrKey(markus?: { apiKey?: string } | null): string {
+    const env = process.env[APIServer.MARKUS_OR_ENV] || process.env['OPENROUTER_API_KEY'] || '';
+    if (env && !this.isLegacyMarkusSubscriptionKey(env)) return env;
+    const legacy = markus?.apiKey?.trim() || '';
+    if (legacy && !this.isLegacyMarkusSubscriptionKey(legacy)) return legacy;
+    return '';
+  }
+
+  /** Persist the Markus-Cloud key to the secret store; config keeps only the ref. */
+  private persistMarkusOrKey(apiKey: string): string {
+    setEnvValue(APIServer.MARKUS_OR_ENV, apiKey);
+    return APIServer.MARKUS_OR_ENV;
+  }
+
   private isLegacyMarkusSubscriptionKey(apiKey: string | undefined): boolean {
     if (!apiKey) return true;
     if (apiKey.startsWith('sk-or-')) return false;
@@ -635,10 +680,8 @@ export class APIServer {
     const markus = currentConfig.llm?.providers?.['markus'] as {
       apiKey?: string;
     } | undefined;
-    const orKey =
-      (markus?.apiKey && markus.apiKey.startsWith('sk-or-') ? markus.apiKey : '')
-      || (process.env['MARKUS_OPENROUTER_KEY']?.startsWith('sk-or-') ? process.env['MARKUS_OPENROUTER_KEY'] : '')
-      || (process.env['OPENROUTER_API_KEY'] || '');
+    // Canonical env store first; legacy plaintext config is a read-only fallback.
+    const orKey = this.resolveMarkusOrKey(markus);
     if (orKey) process.env['MARKUS_OPENROUTER_KEY'] = orKey;
     return {
       serper: { configured: !!search.serperApiKey || !!process.env['SERPER_API_KEY'], preview: mask(search.serperApiKey || process.env['SERPER_API_KEY']), enabled: search.serperEnabled !== false },
@@ -681,7 +724,7 @@ export class APIServer {
       modelsUrl?: string;
       model?: string;
     } | undefined;
-    const currentKey = markus?.apiKey ?? '';
+    const currentKey = this.resolveMarkusOrKey(markus);
     if (!opts?.force && !opts?.rotate && currentKey.startsWith('sk-or-')) {
       return { ok: true, keyPrefix: currentKey.slice(0, 12), modelsUrl: markus?.modelsUrl };
     }
@@ -721,11 +764,13 @@ export class APIServer {
 
       const baseUrl = or.baseUrl || 'https://openrouter.ai/api/v1';
       const modelsUrl = or.modelsUrl || markusCatalogUrlFromHub(hubBase);
+      this.persistMarkusOrKey(or.key); // secret → ~/.markus/.env
       saveConfig({
         llm: {
           providers: {
             markus: {
-              apiKey: or.key,
+              apiKey: null, // never persist plaintext
+              apiKeyEnv: APIServer.MARKUS_OR_ENV,
               baseUrl,
               modelsUrl,
               ...(markus?.model ? { model: markus.model } : {}),
@@ -1688,8 +1733,10 @@ export class APIServer {
       return existingOwner.id as string;
     }
 
-    // No owner found — create fresh
-    const adminPassword = process.env['ADMIN_PASSWORD'] ?? 'markus123';
+    // No owner found — create fresh. Use ADMIN_PASSWORD when explicitly set,
+    // otherwise generate a strong random one and surface it once.
+    // See @markus/shared/utils/secrets.
+    const { password: adminPassword, generated } = resolveInitialAdminPassword();
     const hash = await hashPassword(adminPassword);
     const ownerId = genUserId();
     await this.storage.userRepo.upsert({
@@ -1700,12 +1747,21 @@ export class APIServer {
       role: 'owner',
       passwordHash: hash,
     });
-    log.info('Created admin user (admin@markus.local)', { userId: ownerId });
+    if (generated) {
+      log.warn('Created admin user (admin@markus.local) with a randomly generated initial password.');
+      log.warn(`Initial admin password: ${adminPassword}`);
+      log.warn(`(also saved to ${initialAdminPasswordFile()}, mode 0600 — complete onboarding to set your own credentials)`);
+    } else {
+      log.info('Created admin user (admin@markus.local)', { userId: ownerId });
+    }
     return ownerId;
   }
 
   private get jwtSecret(): string {
-    return process.env['JWT_SECRET'] ?? 'markus-dev-secret-change-in-prod';
+    // resolveJwtSecret() uses the JWT_SECRET env var when set, otherwise a
+    // strong random secret persisted at ~/.markus/jwt-secret.
+    // See @markus/shared/utils/secrets.
+    return resolveJwtSecret();
   }
 
   private get authEnabled(): boolean {
@@ -2784,6 +2840,8 @@ export class APIServer {
       // Sync in-memory identity so agents see the real name immediately
       // (DB was already updated above — this only touches the in-memory map)
       this.orgService.syncHumanIdentity(userId, 'default', name, 'owner', email);
+      // A real owner now exists — the bootstrap password is no longer valid.
+      clearInitialAdminPassword();
       await this.storage.userRepo.updateLastLogin(userId);
       const exp = Math.floor(Date.now() / 1000) + 7 * 24 * 3600;
       const token = await signToken(
@@ -2839,6 +2897,8 @@ export class APIServer {
               'owner',
               email,
             );
+            // Placeholder claimed — the bootstrap password is no longer valid.
+            clearInitialAdminPassword();
             userRow = { ...unclaimedOwner, email, name: adoptedName } as typeof userRow;
           }
         }
@@ -7534,8 +7594,15 @@ EXPLANATION_END`;
     // local accounts; applied to the Hub org when the user later connects Hub.
     if (path === '/api/settings/org' && req.method === 'GET') {
       try {
+        // DB is canonical; markus.json org.name is a one-time seed (legacy read).
+        const localOrg = this.orgService.getDefaultOrganization();
         const cfg = loadConfig(this.markusConfigPath);
-        this.json(res, 200, { org: { id: cfg.org?.id ?? 'default', name: cfg.org?.name ?? 'My Organization' } });
+        this.json(res, 200, {
+          org: {
+            id: localOrg?.id ?? cfg.org?.id ?? 'default',
+            name: localOrg?.name ?? cfg.org?.name ?? 'My Organization',
+          },
+        });
       } catch {
         this.json(res, 200, { org: { id: 'default', name: 'My Organization' } });
       }
@@ -7552,14 +7619,13 @@ EXPLANATION_END`;
           this.json(res, 400, { error: 'name is required' });
           return;
         }
-        const cfg = loadConfig(this.markusConfigPath);
-        const orgId = cfg.org?.id ?? 'default';
-        saveConfig({ org: { id: orgId, name } } as any, this.markusConfigPath);
+        // DB is the single writer for the org name; markus.json is a legacy seed
+        // only. Rename the default org in place (no file write, no duplication).
         const localOrg = this.orgService.getDefaultOrganization();
         if (localOrg && typeof this.orgService.renameOrganization === 'function') {
           this.orgService.renameOrganization(localOrg.id, name);
         }
-        this.json(res, 200, { ok: true, org: { id: localOrg?.id ?? orgId, name } });
+        this.json(res, 200, { ok: true, org: { id: localOrg?.id ?? 'default', name } });
       } catch (err) {
         this.json(res, 500, { error: `Failed to save org name: ${err instanceof Error ? err.message : String(err)}` });
       }
@@ -7636,15 +7702,20 @@ EXPLANATION_END`;
           modelsUrl?: string;
           model?: string;
         };
-        const markusConfig: Record<string, string> = {};
+        const markusConfig: Record<string, unknown> = {};
 
         if (openrouter?.key && openrouter.baseUrl) {
-          markusConfig.apiKey = openrouter.key;
+          this.persistMarkusOrKey(openrouter.key); // secret → ~/.markus/.env
+          markusConfig.apiKeyEnv = APIServer.MARKUS_OR_ENV;
           markusConfig.baseUrl = openrouter.baseUrl;
           if (openrouter.modelsUrl) markusConfig.modelsUrl = openrouter.modelsUrl;
           savedOpenRouter = true;
+        } else if (existing.apiKey && !this.isLegacyMarkusSubscriptionKey(existing.apiKey)) {
+          // No new key supplied — migrate a legacy plaintext key to the store.
+          this.persistMarkusOrKey(existing.apiKey);
+          markusConfig.apiKeyEnv = APIServer.MARKUS_OR_ENV;
         }
-        if (!markusConfig.apiKey && existing.apiKey) markusConfig.apiKey = existing.apiKey;
+        markusConfig.apiKey = null; // never keep plaintext on disk
         if (!markusConfig.baseUrl && existing.baseUrl && !isLegacyMarkusProxyBaseUrl(existing.baseUrl)) {
           markusConfig.baseUrl = existing.baseUrl;
         }
@@ -7663,21 +7734,20 @@ EXPLANATION_END`;
         delete process.env['MARKUS_SUBSCRIPTION_KEY'];
         delete process.env['MARKUS_PROXY_URL'];
         delete process.env['MARKUS_SEARCH_URL'];
-        if (markusConfig.apiKey) {
-          process.env['MARKUS_OPENROUTER_KEY'] = markusConfig.apiKey;
-        }
+        // (Secret already written to the canonical store by persistMarkusOrKey,
+        //  which also sets process.env.)
         if (markusConfig.baseUrl) {
-          process.env['MARKUS_OPENROUTER_BASE'] = markusConfig.baseUrl;
+          process.env['MARKUS_OPENROUTER_BASE'] = String(markusConfig.baseUrl);
         }
         if (markusConfig.modelsUrl) {
-          process.env['MARKUS_MODELS_URL'] = markusConfig.modelsUrl;
+          process.env['MARKUS_MODELS_URL'] = String(markusConfig.modelsUrl);
         }
 
         try {
           if (this.llmRouter && savedOpenRouter) {
             this.llmRouter.registerProviderFromConfig('markus', {
               provider: 'markus',
-              apiKey: String(markusConfig.apiKey || ''),
+              apiKey: String(process.env['MARKUS_OPENROUTER_KEY'] || ''),
               baseUrl: String(markusConfig.baseUrl || 'https://openrouter.ai/api/v1'),
               model: String(markusConfig.model || ''),
               ...(markusConfig.modelsUrl ? { modelsUrl: String(markusConfig.modelsUrl) } : {}),
@@ -8658,53 +8728,32 @@ EXPLANATION_END`;
       if (!auth) return;
       const body = await this.readBody(req);
       const updates: Record<string, string | undefined> = {};
-      if (typeof body['serperApiKey'] === 'string') {
-        updates.serperApiKey = body['serperApiKey'] || undefined;
-        if (body['serperApiKey']) process.env['SERPER_API_KEY'] = body['serperApiKey'] as string;
-        else delete process.env['SERPER_API_KEY'];
-      }
-      if (typeof body['tavilyApiKey'] === 'string') {
-        updates.tavilyApiKey = body['tavilyApiKey'] || undefined;
-        if (body['tavilyApiKey']) process.env['TAVILY_API_KEY'] = body['tavilyApiKey'] as string;
-        else delete process.env['TAVILY_API_KEY'];
-      }
-      if (typeof body['bingApiKey'] === 'string') {
-        updates.bingApiKey = body['bingApiKey'] || undefined;
-        if (body['bingApiKey']) process.env['BING_SEARCH_API_KEY'] = body['bingApiKey'] as string;
-        else delete process.env['BING_SEARCH_API_KEY'];
-      }
-      if (typeof body['googleSearchApiKey'] === 'string') {
-        updates.googleSearchApiKey = body['googleSearchApiKey'] || undefined;
-        if (body['googleSearchApiKey']) process.env['GOOGLE_SEARCH_API_KEY'] = body['googleSearchApiKey'] as string;
-        else delete process.env['GOOGLE_SEARCH_API_KEY'];
-      }
-      if (typeof body['googleSearchCx'] === 'string') {
-        updates.googleSearchCx = body['googleSearchCx'] || undefined;
-        if (body['googleSearchCx']) process.env['GOOGLE_SEARCH_CX'] = body['googleSearchCx'] as string;
-        else delete process.env['GOOGLE_SEARCH_CX'];
-      }
-      if (typeof body['serpApiKey'] === 'string') {
-        updates.serpApiKey = body['serpApiKey'] || undefined;
-        if (body['serpApiKey']) process.env['SERPAPI_API_KEY'] = body['serpApiKey'] as string;
-        else delete process.env['SERPAPI_API_KEY'];
-      }
-      if (typeof body['braveApiKey'] === 'string') {
-        updates.braveApiKey = body['braveApiKey'] || undefined;
-        if (body['braveApiKey']) process.env['BRAVE_SEARCH_API_KEY'] = body['braveApiKey'] as string;
-        else delete process.env['BRAVE_SEARCH_API_KEY'];
-      }
-      if (typeof body['exaApiKey'] === 'string') {
-        updates.exaApiKey = body['exaApiKey'] || undefined;
-        if (body['exaApiKey']) process.env['EXA_API_KEY'] = body['exaApiKey'] as string;
-        else delete process.env['EXA_API_KEY'];
-      }
-      if (typeof body['bochaApiKey'] === 'string') {
-        updates.bochaApiKey = body['bochaApiKey'] || undefined;
-        if (body['bochaApiKey']) process.env['BOCHA_API_KEY'] = body['bochaApiKey'] as string;
-        else delete process.env['BOCHA_API_KEY'];
-      }
+      // Search API keys are secrets → canonical store (`~/.markus/.env`), never
+      // markus.json. GET status reads them back from env (see
+      // buildSearchSettingsStatus). Legacy plaintext config fields are cleared so
+      // a cleared key can never be resurrected by the boot-time compat read.
+      const searchSecret = (field: string, envVar: string) => {
+        if (typeof body[field] !== 'string') return false;
+        if (body[field]) setEnvValue(envVar, body[field] as string);
+        else unsetEnvValue(envVar);
+        return true;
+      };
+      searchSecret('serperApiKey', 'SERPER_API_KEY');
+      searchSecret('tavilyApiKey', 'TAVILY_API_KEY');
+      searchSecret('bingApiKey', 'BING_SEARCH_API_KEY');
+      searchSecret('googleSearchApiKey', 'GOOGLE_SEARCH_API_KEY');
+      searchSecret('googleSearchCx', 'GOOGLE_SEARCH_CX');
+      searchSecret('serpApiKey', 'SERPAPI_API_KEY');
+      searchSecret('braveApiKey', 'BRAVE_SEARCH_API_KEY');
+      searchSecret('exaApiKey', 'EXA_API_KEY');
+      searchSecret('bochaApiKey', 'BOCHA_API_KEY');
       // Markus-hosted search (OpenRouter): opt-out toggle only.
       const searchUpdates: Record<string, unknown> = { ...updates };
+      // Secrets now live in `~/.markus/.env`; strip any legacy plaintext copies
+      // from markus.json so the two stores can never disagree.
+      for (const secretField of ['serperApiKey', 'tavilyApiKey', 'bingApiKey', 'googleSearchApiKey', 'googleSearchCx', 'serpApiKey', 'braveApiKey', 'exaApiKey', 'bochaApiKey']) {
+        searchUpdates[secretField] = null;
+      }
       if (typeof body['useMarkusHosted'] === 'boolean') {
         searchUpdates.useMarkusHosted = body['useMarkusHosted'];
         if (body['useMarkusHosted'] === false) process.env['MARKUS_SEARCH_ENABLED'] = '0';
@@ -9081,22 +9130,9 @@ EXPLANATION_END`;
         };
         const envVar = envVarMap[toolName];
         if (envVar) {
-          process.env[envVar] = apiKey;
-          // Also persist to config env
-          const { loadConfig: loadCfg2 } = await import('@markus/shared');
-          const cfg2 = loadCfg2(this.markusConfigPath);
-          const ctCfg = cfg2.codingTools ?? {};
-          const toolsCfg = (ctCfg.tools ?? {}) as Record<string, Record<string, unknown>>;
-          const toolCfg = toolsCfg[toolName] ?? {};
-          const envCfg = (toolCfg.env ?? {}) as Record<string, string>;
-          envCfg[envVar] = apiKey;
-          toolCfg.env = envCfg;
-          toolsCfg[toolName] = toolCfg;
-          try {
-            saveConfig({ codingTools: { ...ctCfg, tools: toolsCfg } } as any, this.markusConfigPath);
-          } catch (e) {
-            log.warn('Failed to persist API key to config', { error: String(e) });
-          }
+          // Secret → canonical secret store (`~/.markus/.env`), never markus.json.
+          // Loaded into process.env at boot, so the tool subprocess inherits it.
+          setEnvValue(envVar, apiKey);
         }
         this.json(res, 200, { success: true, method: 'api_key', envVar });
         return;
@@ -9242,13 +9278,18 @@ EXPLANATION_END`;
           const { loadConfig: loadCfg } = await import('@markus/shared');
           const currentConfig = loadCfg(this.markusConfigPath);
           const providers = { ...currentConfig.llm.providers };
-          providers[name] = {
-            ...providers[name],
-            apiKey,
+          const prev = providers[name];
+          const next: Record<string, unknown> = {
+            ...prev,
             model,
             ...(baseUrl ? { baseUrl } : {}),
             enabled: enabled !== false,
           };
+          if (name !== 'ollama' && apiKey) {
+            next.apiKeyEnv = this.persistProviderSecret(name, apiKey); // secret → ~/.markus/.env
+          }
+          delete next.apiKey; // never persist plaintext to markus.json
+          providers[name] = next as typeof prev;
           const configUpdates: Record<string, unknown> = { providers };
           if (!currentConfig.llm.routingDefaultModel && enabled !== false) {
             configUpdates.routingDefaultModel = { provider: name, model };
@@ -9325,13 +9366,21 @@ EXPLANATION_END`;
           const currentConfig = loadCfg(this.markusConfigPath);
           const providers = { ...currentConfig.llm.providers };
           const existing = providers[providerName] ?? {};
-          providers[providerName] = {
+          const next: Record<string, unknown> = {
             ...existing,
-            ...(apiKey ? { apiKey } : {}),
             ...(model ? { model } : {}),
             ...(baseUrl !== undefined ? { baseUrl: baseUrl || undefined } : {}),
             ...(typeof enabled === 'boolean' ? { enabled } : {}),
           };
+          const legacyKey = (existing as { apiKey?: string }).apiKey;
+          if (apiKey) {
+            next.apiKeyEnv = this.persistProviderSecret(providerName, apiKey);
+          } else if (legacyKey && !(existing as { apiKeyEnv?: string }).apiKeyEnv) {
+            // Self-heal: migrate a legacy plaintext key to the secret store on any edit.
+            next.apiKeyEnv = this.persistProviderSecret(providerName, legacyKey);
+          }
+          delete next.apiKey; // never persist plaintext to markus.json
+          providers[providerName] = next as typeof existing;
           saveConfig({ llm: { providers } } as any, this.markusConfigPath);
         } catch (e) {
           log.warn('Failed to persist provider update', { error: String(e) });
@@ -9847,13 +9896,20 @@ EXPLANATION_END`;
           };
           const apiKey = process.env[envKeyMap[pu.provider] ?? ''];
           if (!apiKey && pu.provider !== 'ollama') continue;
-          updatedProviders[pu.provider] = {
-            ...updatedProviders[pu.provider],
-            ...(apiKey ? { apiKey } : {}),
+          const prev = updatedProviders[pu.provider];
+          const next: Record<string, unknown> = {
+            ...prev,
             model: pu.model,
             ...(pu.baseUrl ? { baseUrl: pu.baseUrl } : {}),
             enabled: pu.enabled !== false,
           };
+          if (apiKey) {
+            // Persist the detected key to the canonical store (survives restart)
+            // and reference it by name — never plaintext in markus.json.
+            next.apiKeyEnv = this.persistProviderSecret(pu.provider, apiKey);
+          }
+          delete next.apiKey;
+          updatedProviders[pu.provider] = next as typeof prev;
           applied.push(pu.provider);
         }
         saveConfig({ llm: { providers: updatedProviders } } as any, this.markusConfigPath);
@@ -9861,14 +9917,15 @@ EXPLANATION_END`;
         if (this.llmRouter) {
           for (const provName of applied) {
             if (!this.llmRouter.getProvider(provName)) {
-              const cfg = updatedProviders[provName];
-              if (cfg?.apiKey || provName === 'ollama') {
+              const cfg = updatedProviders[provName] as { apiKey?: string; apiKeyEnv?: string; model?: string; baseUrl?: string } | undefined;
+              const resolvedKey = cfg?.apiKey ?? (cfg?.apiKeyEnv ? process.env[cfg.apiKeyEnv] : undefined);
+              if (resolvedKey || provName === 'ollama') {
                 try {
                   this.llmRouter.registerProviderFromConfig(provName, {
                     provider: provName as any,
-                    model: cfg.model ?? '',
-                    apiKey: cfg.apiKey,
-                    baseUrl: cfg.baseUrl,
+                    model: cfg?.model ?? '',
+                    apiKey: resolvedKey,
+                    baseUrl: cfg?.baseUrl,
                   });
                 } catch (e) {
                   log.warn(`Failed to hot-register provider ${provName}`, { error: String(e) });

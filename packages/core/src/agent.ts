@@ -4467,6 +4467,9 @@ export class Agent {
     // 进度心跳：任何工具/LLM 事件都算「有实质进展」，用于区分长任务进行中与疑似卡死。
     // 只写内存 state（listAgents 实时可见），不触发持久化，无 IO 开销。
     this.state.lastProgressAt = new Date().toISOString();
+    // 同一事实、同一汇聚点：同时重置 attention 的 inactivity 兜底，使它不再用
+    // 「总耗时」误杀正常长任务（见 attention.ts / MAILBOX_PROCESSING_TIMEOUT_MS）。
+    this.attentionController.noteProgress();
     // Defensive: strip completion marker from all log content regardless of caller
     const cleanContent = (type === 'text' || type === 'status')
       ? stripCompletionMarker(content)

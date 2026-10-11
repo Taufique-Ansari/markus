@@ -97,9 +97,11 @@ Ports and the default LLM provider/model are **not** environment variables. They
 
 Initial credentials (before onboarding):
 - Email: `admin@markus.local`
-- Password: `markus123`
+- Password: **randomly generated on first run** and printed once to the server console,
+  also saved to `~/.markus/initial-admin-password` (mode 0600). Set `ADMIN_PASSWORD`
+  in your `.env` or `markus.json` to choose it yourself.
 
-**On first login, the onboarding wizard will guide you to set your real name, email, and a new password.** You should complete the profile setup step to replace these default credentials.
+**On first login, the onboarding wizard will guide you to set your real name, email, and a new password.** Once you complete it, the bootstrap password is invalidated automatically.
 
 After onboarding, you can add more human members or hire AI agents from the Team page.
 

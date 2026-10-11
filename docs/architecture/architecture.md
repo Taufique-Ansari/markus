@@ -677,7 +677,7 @@ agent_decisions (id, agent_id, mailbox_item_id, decision, reason, context, decid
 ## 6. Authentication & Multi-User System
 
 - JWT Cookie (`markus_token`, 7-day validity)
-- Initial account: `admin@markus.local` / `markus123` (onboarding wizard prompts user to set real name, email, and password)
+- Initial account: `admin@markus.local` / a randomly generated bootstrap password (printed once to the console on first run; onboarding wizard prompts user to set real name, email, and password)
 - Roles: `owner` > `admin` > `member` > `guest`
 - Only `owner` / `admin` can manage team members and Agents
 

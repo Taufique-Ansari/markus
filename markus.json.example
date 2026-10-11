@@ -42,8 +42,8 @@
     "webPort": 8057
   },
   "security": {
-    "adminPassword": "markus123",
-    "gatewaySecret": "change-me-in-production"
+    "adminPassword": "",
+    "gatewaySecret": ""
   },
   "hub": {
     "url": "https://markus.global"

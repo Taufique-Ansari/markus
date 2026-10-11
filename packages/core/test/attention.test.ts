@@ -416,6 +416,57 @@ describe('processFocusedItem (via runLoop)', () => {
     expect(delegate.cancelProcessing).toHaveBeenCalledTimes(1); // cancel was still attempted
   });
 
+  // A2/A3 pin the REDESIGN: the backstop is an INACTIVITY window, not a total-duration cap.
+  // A turn that keeps reporting progress must survive arbitrarily long; only silence is fatal.
+  it('A2: a long turn that keeps reporting progress is NOT backstop-killed (inactivity, not duration)', async () => {
+    let finished = false;
+    const processMailboxItem = vi.fn().mockImplementation(async () => {
+      // Runs ~200ms — well beyond the 60ms window — but reports progress each tick.
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 20));
+        controller.noteProgress();
+      }
+      finished = true;
+      return 'done';
+    });
+    const cancelProcessing = vi.fn();
+    const { controller, mailbox, delegate } = makeController({ processMailboxItem, cancelProcessing });
+    controller.setProcessingTimeoutMs(60);
+    controller.setBackstopCancelGraceMs(200);
+
+    mailbox.enqueue('a2a_message', { summary: 'long-busy', content: 'body' });
+    controller.start();
+
+    await vi.waitFor(() => expect(finished).toBe(true), { timeout: 3000 });
+    // Give the poller room to (wrongly) fire if the total-duration cap were still in place.
+    await new Promise(r => setTimeout(r, 120));
+    controller.stop();
+
+    expect(delegate.cancelProcessing).not.toHaveBeenCalled();
+    expect(mailbox.depth).toBe(0); // item completed normally — never interrupted
+  });
+
+  it('A3: progress keeps a turn alive, but once it goes silent the window still fires', async () => {
+    const progressTimer = { id: undefined as ReturnType<typeof setInterval> | undefined };
+    const processMailboxItem = vi.fn().mockImplementation(() => {
+      progressTimer.id = setInterval(() => controller.noteProgress(), 10);
+      // Progress stops at ~40ms → then silence. Window is 60ms → must be caught (~100ms).
+      setTimeout(() => { if (progressTimer.id) clearInterval(progressTimer.id); }, 40);
+      return new Promise<string>(() => { /* never settles on its own */ });
+    });
+    const cancelProcessing = vi.fn(); // ignores cancel → orphan abandoned (no requeue loop)
+    const { controller, mailbox, delegate } = makeController({ processMailboxItem, cancelProcessing });
+    controller.setProcessingTimeoutMs(60);
+    controller.setBackstopCancelGraceMs(30);
+
+    mailbox.enqueue('a2a_message', { summary: 'busy-then-silent', content: 'body' });
+    controller.start();
+
+    await vi.waitFor(() => expect(delegate.cancelProcessing).toHaveBeenCalledTimes(1), { timeout: 3000 });
+    controller.stop();
+    expect(processMailboxItem).toHaveBeenCalledTimes(1); // dropped, not requeued
+  });
+
   // H7：旧行为已推翻 —— 旧测试断言「缺完成标记 → agent:incomplete + dropped」。
   // 新语义下非空且不含任何标记的回复是完全正常的结束：不产生 incomplete 事件、
   // 不重试、不丢弃。

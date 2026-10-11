@@ -1,7 +1,6 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
-import { createLogger, type AuthProfile, type LLMAuthType, type OAuthTokens } from '@markus/shared';
+import { createLogger, markusHome, type AuthProfile, type LLMAuthType, type OAuthTokens } from '@markus/shared';
 
 const log = createLogger('auth-profiles');
 
@@ -20,7 +19,7 @@ export class AuthProfileStore {
   private lockPath: string;
 
   constructor(stateDir?: string) {
-    const dir = stateDir ?? join(homedir(), '.markus');
+    const dir = stateDir ?? markusHome();
     this.filePath = join(dir, 'auth-profiles.json');
     this.lockPath = join(dir, '.auth-profiles.lock');
     mkdirSync(dir, { recursive: true });

@@ -38,7 +38,7 @@ After a successful start:
 
 - **Web UI**: http://localhost:8057
 - **API**: http://localhost:8056
-- **First login**: `admin@markus.local` / `markus123`; the onboarding wizard will ask you to set your own credentials
+- **First login**: `admin@markus.local` + a randomly generated bootstrap password (printed once to the console on first run / saved to `~/.markus/initial-admin-password`); the onboarding wizard will ask you to set your own credentials
 - **Storage**: SQLite (zero external dependencies); data lives under `~/.markus/` by default
 
 > `pnpm dev` runs `pnpm build` first, then starts the API and Vite together. The first start takes a minute or two; when you see both processes (the `api` one in blue, the `ui` one in green), it has succeeded.

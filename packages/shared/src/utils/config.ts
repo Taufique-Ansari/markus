@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, openSync, closeSync } from 'node:fs';
-import { resolve, join } from 'node:path';
-import { homedir } from 'node:os';
+import { resolve } from 'node:path';
 import type { CapabilityRoutingConfig } from '../types/model-catalog.js';
+import { markusConfigPath } from './config-paths.js';
 
 export interface MarkusConfig {
   org: {
@@ -13,6 +13,10 @@ export interface MarkusConfig {
     defaultModel: string;
     providers: Record<string, {
       apiKey?: string;
+      /** Name of the env var (in `~/.markus/.env`) that holds the apiKey. The
+       *  canonical form: the secret lives in the env store, the config only
+       *  references it by name (mirrors dsh `apiKeyEnv` / OpenClaw SecretRef). */
+      apiKeyEnv?: string;
       baseUrl?: string;
       model?: string;
       enabled?: boolean;
@@ -206,12 +210,16 @@ const DEFAULT_CONFIG: MarkusConfig = {
     providers: {},
   },
   server: { apiPort: 8056, webPort: 8057 },
-  security: { adminPassword: 'markus123', gatewaySecret: 'markus-gateway-default-secret-change-me' },
+  // NOTE: no default adminPassword / gatewaySecret here. Shipping a known
+  // literal would let anyone claim a fresh instance or sign gateway requests.
+  // Secrets are resolved at runtime (env var, or a random value persisted to
+  // ~/.markus/) — see @markus/shared/utils/secrets.
+  security: {},
   hub: { url: 'https://markus.global' },
 };
 
 export function getDefaultConfigPath(): string {
-  return join(homedir(), '.markus', 'markus.json');
+  return markusConfigPath();
 }
 
 export function loadConfig(configPath?: string): MarkusConfig {

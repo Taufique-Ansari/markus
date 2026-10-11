@@ -7,6 +7,7 @@ import { existsSync } from 'node:fs';
 import {
   loadConfig,
   getDefaultConfigPath,
+  loadEnvFile,
 } from '@markus/shared';
 import type { APIServer } from '@markus/org-manager';
 
@@ -42,6 +43,10 @@ export interface StartBackendOptions {
  * - Does NOT register SIGINT handlers (caller manages lifecycle)
  */
 export async function startBackend(options: StartBackendOptions = {}): Promise<BackendInstance> {
+  // The packaged desktop app starts the backend directly (it never goes through
+  // the CLI entry point), so env loading must happen here too. This is what lets
+  // an installed client read its secrets from the canonical `~/.markus/.env`.
+  loadEnvFile();
   const configPath = options.configPath ?? getDefaultConfigPath();
 
   // Auto-init if no config exists

@@ -21,7 +21,7 @@ export {
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { createLogger, readManifest } from '@markus/shared';
+import { createLogger, markusPath, readManifest } from '@markus/shared';
 import { InMemorySkillRegistry } from './registry.js';
 import { readSkillInstructionsDetailed, resolveMcpServerPaths } from './loader.js';
 import type { SkillManifest, SkillCategory } from './types.js';
@@ -39,7 +39,7 @@ export interface SkillRegistryOptions {
  *   ~/.openclaw/skills/  — OpenClaw/ClawHub skills
  */
 export const WELL_KNOWN_SKILL_DIRS = [
-  join(homedir(), '.markus', 'skills'),
+  markusPath('skills'),
   join(homedir(), '.claude', 'skills'),
   join(homedir(), '.openclaw', 'skills'),
 ];

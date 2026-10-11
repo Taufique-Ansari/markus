@@ -14,6 +14,7 @@ import {
   type RoleTemplate,
   type RoleCategory,
   saveConfig,
+  markusPath,
   type CodingToolName,
   type CodingToolConfig,
   type GoalConfig,
@@ -69,7 +70,6 @@ import type { TemplateRegistry } from './templates/registry.js';
 import type { TemplateInstantiateRequest } from './templates/types.js';
 import { join, dirname, resolve, sep } from 'node:path';
 import { mkdirSync, readFileSync, existsSync, copyFileSync, rmSync, readdirSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 
 const log = createLogger('agent-manager');
 
@@ -641,7 +641,7 @@ export class AgentManager {
   }) {
     this.llmRouter = options.llmRouter;
     this.roleLoader = options.roleLoader ?? new RoleLoader();
-    this.dataDir = options.dataDir ?? join(homedir(), '.markus', 'agents');
+    this.dataDir = options.dataDir ?? markusPath('agents');
     this.sharedDataDir = options.sharedDataDir;
     this.eventBus = options.eventBus ?? new EventBus();
     // P1-10：启动期接线 Anthropic 精确 token 计数。
@@ -1432,10 +1432,10 @@ export class AgentManager {
 
     // Team managers get write access to team data dir for announcements/norms
     const teamDataDir = (request.teamId && request.agentRole === 'manager')
-      ? join(homedir(), '.markus', 'teams', request.teamId)
+      ? markusPath('teams', request.teamId)
       : undefined;
 
-    const builderArtifactsDir = join(homedir(), '.markus', 'builder-artifacts');
+    const builderArtifactsDir = markusPath('builder-artifacts');
 
     const pathPolicy = this.buildPathPolicy(id, workspacePath, agentRoleDir, teamDataDir, builderArtifactsDir);
 
@@ -2240,7 +2240,7 @@ export class AgentManager {
     this.forwardAgentEvents(agent);
 
     if (config.teamId) {
-      agent.setTeamDataDir(join(homedir(), '.markus', 'teams', config.teamId));
+      agent.setTeamDataDir(markusPath('teams', config.teamId));
     }
 
     this.attachTerminalTools(agent, id);
@@ -2356,10 +2356,10 @@ export class AgentManager {
     mkdirSync(workspacePath, { recursive: true });
 
     const teamDataDir = (config.teamId && config.agentRole === 'manager')
-      ? join(homedir(), '.markus', 'teams', config.teamId)
+      ? markusPath('teams', config.teamId)
       : undefined;
 
-    const builderArtifactsDir = join(homedir(), '.markus', 'builder-artifacts');
+    const builderArtifactsDir = markusPath('builder-artifacts');
 
     const pathPolicy = this.buildPathPolicy(id, workspacePath, agentRoleDir, teamDataDir, builderArtifactsDir);
 
@@ -3115,7 +3115,7 @@ export class AgentManager {
     this.forwardAgentEvents(agent);
 
     if (config.teamId) {
-      agent.setTeamDataDir(join(homedir(), '.markus', 'teams', config.teamId));
+      agent.setTeamDataDir(markusPath('teams', config.teamId));
     }
 
     this.attachTerminalTools(agent, id);

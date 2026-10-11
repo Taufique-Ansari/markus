@@ -1,9 +1,9 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import type { AgentToolHandler } from '../agent.js';
 import type { ImageResult, MultiModalProviderInterface, MultiModalToolSchemas, VideoResult, VideoReference, VideoFrameImage, TTSOptions, DecisionAnswer, DecisionCriteria, DecisionEntry, DecisionQuestion, DecisionQuestionType, DecisionResult } from '../llm/provider.js';
-import { createLogger, type ModelCapabilityType, type LLMRequest } from '@markus/shared';
+import { createLogger, markusPath, type ModelCapabilityType, type LLMRequest } from '@markus/shared';
 import { toolErr, toolOk } from './result.js';
 
 const log = createLogger('multimodal-tools');
@@ -46,7 +46,7 @@ async function fetchAudioBuffer(source: string): Promise<Buffer> {
 function mediaDir(kind: 'audio' | 'images' | 'videos'): string {
   // Prefer ~/.markus/generated so /api/files/image can serve them; fall back to tmp.
   try {
-    const dir = join(homedir(), '.markus', 'generated', kind);
+    const dir = markusPath('generated', kind);
     mkdirSync(dir, { recursive: true });
     return dir;
   } catch {

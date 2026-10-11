@@ -231,8 +231,9 @@ ngrok gives you a random URL like `https://abc123.ngrok-free.app`. Share it for 
 
 Before exposing Markus to the internet, ensure:
 
-- [ ] **Change the admin password** — complete the onboarding wizard to set your own credentials, or set `ADMIN_PASSWORD` in your `.env` or `markus.json` (initial default is `markus123`)
-- [ ] **Change the gateway secret** — set `GATEWAY_SECRET` in your `.env` (default is `markus-gateway-default-secret-change-me`)
+- [ ] **Set the admin password** — either complete the onboarding wizard to set your own credentials, or set `ADMIN_PASSWORD` in your `.env` or `markus.json`. (If unset, a random bootstrap password is generated and printed once on first run — never ship a known default.)
+- [ ] **Set the gateway secret** — set `GATEWAY_SECRET` in your `.env`. (If unset, a random secret is generated and persisted to `~/.markus/gateway-secret`.)
+- [ ] **Set `JWT_SECRET`** — set it in your `.env` so all processes/restarts share one signing key. (If unset, a random secret is generated and persisted to `~/.markus/jwt-secret`.)
 - [ ] **Use HTTPS** — Cloudflare Tunnel and Tailscale provide this automatically; for FRP, add nginx + Let's Encrypt
 - [ ] **Enable authentication layer** — Cloudflare Access (free), Tailscale ACLs, or nginx basic auth in front
 - [ ] **Review CORS** — current default allows all origins (`*`); for production, restrict to your domain
