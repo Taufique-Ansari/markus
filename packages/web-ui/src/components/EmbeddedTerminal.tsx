@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
@@ -119,6 +120,7 @@ export function EmbeddedTerminal({
   onOpenPath,
   apiRef,
 }: Props) {
+  const { t } = useTranslation('common');
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -170,7 +172,7 @@ export function EmbeddedTerminal({
     const api = window.markusDesktop?.terminal;
     if (!el) return;
     if (!api) {
-      setError('Embedded terminal requires Markus Desktop.');
+      setError('desktopOnly');
       return;
     }
 
@@ -281,7 +283,7 @@ export function EmbeddedTerminal({
         const created = await api.create(terminalId, { cwd: createCwd, title, cols, rows });
         if (disposed) return;
         if (!created.ok) {
-          setError(created.error || 'Failed to create terminal');
+          setError(created.error || 'createFailed');
           return;
         }
         if (created.info) {
@@ -499,7 +501,7 @@ export function EmbeddedTerminal({
                 setSearchOpen(false);
               }
             }}
-            placeholder="Find in terminal…"
+            placeholder={t('terminal.searchPlaceholder')}
             className="flex-1 min-w-0 text-xs bg-transparent outline-none text-fg-primary placeholder:text-fg-muted"
           />
           <button
@@ -507,7 +509,7 @@ export function EmbeddedTerminal({
             className="text-[11px] px-2 py-0.5 rounded text-fg-secondary hover:bg-surface-overlay"
             onClick={() => searchRef.current?.findNext(searchQuery)}
           >
-            Next
+            {t('terminal.searchNext')}
           </button>
           <button
             type="button"
@@ -519,7 +521,23 @@ export function EmbeddedTerminal({
         </div>
       )}
       {error ? (
-        <div className="flex-1 flex items-center justify-center p-4 text-sm text-red-500">{error}</div>
+        <div className="flex-1 flex flex-col items-center justify-center gap-2 p-6 text-center">
+          <svg className="w-8 h-8 text-fg-muted" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="2" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M7 9l3 3-3 3M13 15h4" />
+          </svg>
+          {error === 'desktopOnly' ? (
+            <>
+              <p className="text-sm font-medium text-fg-secondary">{t('terminal.desktopOnlyTitle')}</p>
+              <p className="text-xs text-fg-muted max-w-xs">{t('terminal.desktopOnlyDesc')}</p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-medium text-fg-secondary">{t('terminal.createFailedTitle')}</p>
+              <p className="text-xs text-fg-muted max-w-xs break-words">{error === 'createFailed' ? t('terminal.createFailedDesc') : error}</p>
+            </>
+          )}
+        </div>
       ) : (
         <div
           ref={hostRef}
@@ -532,7 +550,7 @@ export function EmbeddedTerminal({
           onClick={jumpToBottom}
           className="absolute bottom-3 right-3 z-10 text-[11px] px-2.5 py-1 rounded-md bg-brand-600 text-white shadow-lg hover:bg-brand-500"
         >
-          ↓ Jump to bottom
+          {t('terminal.jumpToBottom')}
         </button>
       )}
     </div>

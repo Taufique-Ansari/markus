@@ -22,10 +22,13 @@ import {
   APP_VERSION,
   userId,
   PROVIDERS,
+  resolveJwtSecret,
+  resolveGatewaySecret,
   type LLMProviderConfig,
   type DecisionType,
   type MarkusConfig,
   pickOrgSecretary,
+  setEnvValue,
 } from '@markus/shared';
 import {
   AgentManager,
@@ -356,11 +359,13 @@ export async function createServices(config: ReturnType<typeof loadConfig>) {
   const providerMeta = new Map(PROVIDERS.map((p) => [p.id, p]));
   const envPrefix = (id: string) => id.toUpperCase().replace(/-/g, '_');
 
-  // Markus Cloud — OpenRouter member key only (chat + search).
+  // Markus Cloud — OpenRouter member key only (chat + search). The key lives in
+  // the canonical secret store (~/.markus/.env); config keeps only a reference.
   const markusCfg = config.llm.providers['markus'] ?? {};
-  const markusOrKey = markusCfg.apiKey?.startsWith('sk-or-')
+  const legacyMarkusKey = markusCfg.apiKey?.startsWith('sk-or-')
     ? markusCfg.apiKey
     : (markusCfg.apiKey && !/^markus[_-]/i.test(markusCfg.apiKey) ? markusCfg.apiKey : '');
+  const markusOrKey = process.env['MARKUS_OPENROUTER_KEY'] || legacyMarkusKey;
   if (markusOrKey) {
     const cfgBaseUrl = markusCfg.baseUrl ?? '';
     const markusOrBase =
@@ -394,15 +399,19 @@ export async function createServices(config: ReturnType<typeof loadConfig>) {
     const needPersist =
       (markusModelsUrl && markusModelsUrl !== (prev.modelsUrl ?? ''))
       || (markusOrBase && markusOrBase !== (prev.baseUrl ?? ''))
-      || (markusOrKey && markusOrKey !== (prev.apiKey ?? ''))
+      || !!prev.apiKey            // legacy plaintext on disk → migrate to the store
+      || !prev.apiKeyEnv          // or the env reference is missing
       || !!(prev.subscriptionKey || prev.proxyUrl);
     if (needPersist) {
       try {
+        // Secret → canonical store; config keeps only the reference.
+        setEnvValue('MARKUS_OPENROUTER_KEY', markusOrKey);
         saveConfig({
           llm: {
             providers: {
               markus: {
-                apiKey: markusOrKey,
+                apiKey: null, // never persist plaintext
+                apiKeyEnv: 'MARKUS_OPENROUTER_KEY',
                 baseUrl: markusOrBase,
                 ...(markusModelsUrl ? { modelsUrl: markusModelsUrl } : {}),
                 ...(prev.model ? { model: prev.model } : {}),
@@ -492,11 +501,23 @@ export async function createServices(config: ReturnType<typeof loadConfig>) {
       continue;
     }
 
+    // Secret precedence — uniform across the platform: an env value (process
+    // env, incl. the canonical `~/.markus/.env`) wins, then the config's
+    // `apiKeyEnv` indirection, then — LEGACY, read-only — a raw `apiKey` stored
+    // in markus.json by older clients. Writes always go to `~/.markus/.env`
+    // (referenced by name); plaintext config keys are never written again.
     const apiKey =
-      cfg.apiKey
+      (cfg.apiKeyEnv ? process.env[cfg.apiKeyEnv] : undefined)
       ?? (meta ? process.env[meta.envKey] : undefined)
-      ?? process.env[`${prefix}_API_KEY`];
+      ?? process.env[`${prefix}_API_KEY`]
+      ?? cfg.apiKey;
     if (!apiKey) continue;
+    if (cfg.apiKey && !cfg.apiKeyEnv) {
+      log.warn(
+        'Provider apiKey read from markus.json (legacy plaintext). Move it to ~/.markus/.env; the config value is read-only from now on.',
+        { provider: name },
+      );
+    }
 
     const model =
       cfg.model
@@ -520,12 +541,13 @@ export async function createServices(config: ReturnType<typeof loadConfig>) {
     };
   }
 
-  // If the configured default provider has no API key, fall back to the first available one
-  if (!providerConfigs[defaultProvider]) {
-    const available = Object.keys(providerConfigs);
-    if (available.length > 0) {
-      defaultProvider = available[0];
-    }
+  // Do NOT let a merely env-detected provider hijack the default. The configured
+  // default is the user's intent (factory default = markus); when it has no
+  // usable config yet the router transparently falls back to any available
+  // provider at call time. We only auto-pick when nothing was configured at all,
+  // and prefer Markus Cloud over an arbitrary env provider.
+  if (!providerConfigs[defaultProvider] && !defaultProvider) {
+    defaultProvider = providerConfigs['markus'] ? 'markus' : Object.keys(providerConfigs)[0];
   }
 
   const llmRouter = LLMRouter.createDefault(providerConfigs, defaultProvider);
@@ -884,6 +906,9 @@ async function startServerCore(
   // Propagate markus.json security settings into env so downstream services can read them
   if (config.security?.adminPassword && !process.env['ADMIN_PASSWORD']) {
     process.env['ADMIN_PASSWORD'] = config.security.adminPassword;
+  }
+  if (config.security?.gatewaySecret && !process.env['GATEWAY_SECRET']) {
+    process.env['GATEWAY_SECRET'] = config.security.gatewaySecret;
   }
 
   // Propagate markus.json search API keys into env so web_search tool can read them
@@ -1589,7 +1614,7 @@ async function startServerCore(
   // Task resume is triggered after agents finish starting (see below).
 
   // Wire External Agent Gateway for OpenClaw integration
-  const gatewaySecret = config.security?.gatewaySecret ?? process.env['GATEWAY_SECRET'] ?? 'markus-gateway-default-secret-change-me';
+  const gatewaySecret = resolveGatewaySecret();
   const gateway = new ExternalAgentGateway({ signingSecret: gatewaySecret });
 
   gateway.setAgentCreator(async (opts) => {
@@ -1658,7 +1683,7 @@ async function startServerCore(
     }));
   });
   apiServer.setGateway(gateway, gatewaySecret);
-  log.info('External Agent Gateway enabled', { secret: gatewaySecret === 'markus-gateway-default-secret-change-me' ? '(default)' : '(custom)' });
+  log.info('External Agent Gateway enabled', { secret: process.env['GATEWAY_SECRET'] ? '(custom)' : '(auto-generated)' });
 
   // ── Remote Access (WebRTC P2P via markus-hub + signal server) ─────────
   {
@@ -1673,7 +1698,7 @@ async function startServerCore(
         hubToken: token,
         instanceName: config.remote?.instanceName ?? config.org?.name ?? 'My Markus',
         localPort: config.server?.apiPort ?? 8056,
-        jwtSecret: process.env['JWT_SECRET'],
+        jwtSecret: resolveJwtSecret(),
       });
     };
 

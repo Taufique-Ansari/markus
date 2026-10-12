@@ -10,14 +10,13 @@ import { join, resolve, dirname } from 'node:path';
 import {
   existsSync, mkdirSync, writeFileSync, copyFileSync, statSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
-import { buildManifest, kebab } from '@markus/shared';
+import { buildManifest, kebab, markusPath } from '@markus/shared';
 import type { ExternalSkillFormat, NormalizedSkill, SkillImportOptions, SkillImportResult, SkillExportOptions, SkillExportResult, RenderedFile } from './types.js';
 import { detectSkillPackageFormat } from './detect.js';
 import { parseSkillPackage } from './parse.js';
 import { renderSkill } from './render.js';
 
-const MARKUS_SKILLS_DIR = join(homedir(), '.markus', 'skills');
+const MARKUS_SKILLS_DIR = markusPath('skills');
 
 function sanitizeName(name: string): string {
   return kebab(name) || 'skill';

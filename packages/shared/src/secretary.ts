@@ -22,6 +22,42 @@
  * `Secretary` / `秘书`, or a role name starting with `secretary`.
  */
 
+import { normalizeLanguage } from './locale.js';
+
+/**
+ * Localized display name for the default (org-level) Secretary agent, keyed by
+ * bare language subtag. The seeded agent inherits the name matching the host /
+ * owner locale so first-run users don't meet an English label in a non-English
+ * environment. Identification never depends on the name alone — `agentRole`
+ * and the role template keep working regardless.
+ */
+export const SECRETARY_DISPLAY_NAMES: Record<string, string> = {
+  en: 'Secretary',
+  zh: '秘书',
+  ja: '秘書',
+  ko: '비서',
+  es: 'Secretario',
+  pt: 'Secretário',
+  fr: 'Secrétaire',
+  de: 'Sekretär',
+  it: 'Segretario',
+  ru: 'Секретарь',
+  id: 'Sekretaris',
+  vi: 'Thư ký',
+  th: 'เลขานุการ',
+  tr: 'Sekreter',
+  ar: 'سكرتير',
+  hi: 'सचिव',
+};
+
+/** Every known Secretary display name — locales we have a label for. */
+const SECRETARY_NAMES = new Set(Object.values(SECRETARY_DISPLAY_NAMES));
+
+/** The Secretary name for a locale (falls back to English). */
+export function secretaryDisplayName(locale?: string): string {
+  return SECRETARY_DISPLAY_NAMES[normalizeLanguage(locale)] ?? SECRETARY_DISPLAY_NAMES['en']!;
+}
+
 /** The tag subset every Secretary predicate looks at. */
 export interface SecretaryLikeFields {
   name?: string;
@@ -42,7 +78,7 @@ export function isSecretaryLikeAgent(a: SecretaryLikeFields): boolean {
   const role = (a.role ?? '').toLowerCase().trim();
   const name = (a.name ?? '').trim();
   if (a.agentRole === 'secretary') return true;
-  if (name === 'Secretary' || name === '秘书') return true;
+  if (SECRETARY_NAMES.has(name)) return true;
   // "secretary", "Secretary 角色定义", etc.
   if (role === 'secretary' || role.startsWith('secretary')) return true;
   return false;
@@ -60,7 +96,7 @@ export function pickOrgSecretary<T extends SecretaryCandidate>(agents: readonly 
   if (secretaries.length === 0) return undefined;
   return (
     secretaries.find((a) => !a.teamId)
-    ?? secretaries.find((a) => a.name === 'Secretary' || a.name === '秘书')
+    ?? secretaries.find((a) => SECRETARY_NAMES.has((a.name ?? '').trim()))
     ?? secretaries[0]
   );
 }

@@ -98,7 +98,7 @@ describe('createServices', () => {
     delete process.env.MINIMAX_CN_API_KEY;
   }, 60000);
 
-  it('falls back to first available provider when default has no key', async () => {
+  it('keeps the configured default provider — an env key never hijacks it', async () => {
     delete process.env.ANTHROPIC_API_KEY;
     process.env.OPENAI_API_KEY = 'sk-openai12345678901';
 
@@ -114,6 +114,23 @@ describe('createServices', () => {
     const config = loadConfig(configPath);
     const services = await createServices(config);
     expect(services.llmRouter).toBeDefined();
+    // openai becomes *usable* (env key) but must NOT silently become the default.
+    expect(services.llmRouter.defaultProviderName).toBe('anthropic');
+    expect(services.llmRouter.listProviders()).toContain('openai');
+
+    delete process.env.OPENAI_API_KEY;
+  }, 60000);
+
+  it('defaults to markus (not an env-detected provider) on a fresh install', async () => {
+    process.env.OPENAI_API_KEY = 'sk-openai12345678901';
+    // No markus OpenRouter key → markus is not registered, but it is still the
+    // configured default; the router falls back to openai at call time.
+    writeConfig({ llm: { defaultProvider: 'markus', providers: {} } });
+
+    const config = loadConfig(configPath);
+    const services = await createServices(config);
+    expect(services.llmRouter.defaultProviderName).toBe('markus');
+    expect(services.llmRouter.listProviders()).toContain('openai');
 
     delete process.env.OPENAI_API_KEY;
   }, 60000);

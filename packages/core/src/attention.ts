@@ -17,6 +17,7 @@ import {
   MAILBOX_ITEM_MAX_RETRIES,
   END_TURN_REPLY_SENTINEL,
   MAILBOX_PROCESSING_TIMEOUT_MS,
+  MAILBOX_INACTIVITY_POLL_MS,
   BACKSTOP_CANCEL_GRACE_MS,
   MAILBOX_COALESCE_WINDOW_MS,
   APPROVAL_WAIT_TIMEOUT_MS,
@@ -219,8 +220,15 @@ export class AttentionController {
   /** 串行模式处理起始时间存储（并发模式走 workerStates）。 */
   private processingStartedAtStorage?: number;
   private waitingForHumanApproval = false;
-  /** Backstop timeout override (test/config); defaults to MAILBOX_PROCESSING_TIMEOUT_MS. */
+  /** Backstop window override (test/config); defaults to MAILBOX_PROCESSING_TIMEOUT_MS. */
   private processingTimeoutMs?: number;
+  /**
+   * 每个 worker 的「最后一次进展」时间戳（ms）。backstop 从「总耗时」改为「无进展」后，
+   * 判据是 `now - progressAt[workerId] >= window`：只要还在产出（文本 / tool_start /
+   * tool_end / status / error）就永远不判超时，只有真正静默才兜底。进展由 delegate 通过
+   * `noteProgress()` 上报（agent 的 activity-log 汇聚点）。
+   */
+  private progressAt = new Map<number, number>();
   /**
    * Backstop 超时后等待「在途 turn 真正结束」的宽限期。
    * 可用 setBackstopCancelGraceMs 覆盖（测试需要确定性短宽限期）。
@@ -327,9 +335,19 @@ export class AttentionController {
     this.waitingForHumanApproval = waiting;
   }
 
-  /** Override the processing backstop timeout (ms). Primarily for tests/config. */
+  /** Override the processing backstop window (ms). Primarily for tests/config. */
   setProcessingTimeoutMs(ms: number): void {
     this.processingTimeoutMs = ms > 0 ? ms : undefined;
+  }
+
+  /**
+   * 上报「当前 worker 正在产出进展」，重置 inactivity 兜底计时。
+   * 由 delegate（agent）在每次 LLM 输出 / 工具调用时调用 —— 与 agent 的
+   * `state.lastProgressAt` 是同一语义、同一汇聚点（emitActivityLog）。
+   * 无处理进行时写入 1 号 worker 也无害：该键只在对应 worker 处理期间被读取。
+   */
+  noteProgress(): void {
+    this.progressAt.set(this.currentWorkerId(), Date.now());
   }
 
   /**
@@ -908,6 +926,8 @@ export class AttentionController {
     let timedOut = false;
     /** backstop 超时后，上一次尝试在宽限期内仍未结束 → 禁止重排（防重复副作用）。 */
     let orphanAbandoned = false;
+    /** Inactivity backstop 定时器（处理结束 / 超时后清理）。 */
+    let backstopTimer: ReturnType<typeof setInterval> | undefined;
     // P0 租约续租：处理期间周期续租。不续租 → 租约到期后该项会被其它 worker
     // （含其它实例）回收重认领 → 同一 item 被两个 worker 重复处理。
     const leaseRenewTimer = setInterval(() => {
@@ -932,9 +952,24 @@ export class AttentionController {
       const backstopMs = this.waitingForHumanApproval
         ? APPROVAL_WAIT_TIMEOUT_MS
         : (this.processingTimeoutMs ?? MAILBOX_PROCESSING_TIMEOUT_MS);
-      const backstop = new Promise<undefined>(resolve =>
-        setTimeout(() => resolve(undefined), backstopMs),
-      );
+      // Inactivity backstop (was: total-duration cap). A turn that keeps reporting
+      // progress via noteProgress() is never interrupted, however long it runs;
+      // only a turn silent for `backstopMs` is treated as hung. Adaptive poll keeps
+      // small (test) windows punctual without busy-waiting on production windows.
+      const backstopStartedAt = Date.now();
+      this.progressAt.set(workerId, backstopStartedAt);
+      const pollMs = Math.max(10, Math.min(MAILBOX_INACTIVITY_POLL_MS, Math.floor(backstopMs / 4)));
+      const backstop = new Promise<undefined>(resolve => {
+        backstopTimer = setInterval(() => {
+          const last = this.progressAt.get(workerId) ?? backstopStartedAt;
+          if (Date.now() - last >= backstopMs) {
+            if (backstopTimer) clearInterval(backstopTimer);
+            backstopTimer = undefined;
+            resolve(undefined);
+          }
+        }, pollMs);
+        if (typeof backstopTimer.unref === 'function') backstopTimer.unref();
+      });
       const result = await Promise.race([
         processing?.then(r => ({ done: true as const, reply: r })),
         backstop.then(() => ({ done: false as const, reply: undefined })),
@@ -999,6 +1034,8 @@ export class AttentionController {
       });
     } finally {
       clearInterval(leaseRenewTimer);
+      if (backstopTimer) clearInterval(backstopTimer);
+      this.progressAt.delete(workerId);
       // Deregister the in-flight attempt for this worker (the promise may still be
       // pending when abandoned — we simply stop waiting on it).
       // 必须用开始时捕获的 workerId：重算 currentWorkerId() 在 ALS 漂移时会删错键。

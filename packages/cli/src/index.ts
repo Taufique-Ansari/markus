@@ -1,25 +1,12 @@
-import { resolve } from 'node:path';
-import { readFileSync, existsSync } from 'node:fs';
 import process from 'node:process';
 import { Command } from 'commander';
-import { APP_VERSION, checkForUpdate } from '@markus/shared';
+import { APP_VERSION, checkForUpdate, loadEnvFile } from '@markus/shared';
 import { setGlobalJson } from './output.js';
 
-// Load .env file from project root
-const envPath = resolve(process.cwd(), '.env');
-if (existsSync(envPath)) {
-  for (const line of readFileSync(envPath, 'utf-8').split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eqIdx = trimmed.indexOf('=');
-    if (eqIdx === -1) continue;
-    const key = trimmed.slice(0, eqIdx).trim();
-    const val = trimmed.slice(eqIdx + 1).trim();
-    if (key && !process.env[key]) {
-      process.env[key] = val;
-    }
-  }
-}
+// Populate process.env before anything reads it. Single implementation in
+// @markus/shared: canonical `~/.markus/.env` first (installed clients), then a
+// legacy `<cwd>/.env` for developer checkouts. Never overrides existing values.
+loadEnvFile();
 
 // Handle -v / --version with update check before Commander takes over
 const versionArg = process.argv[2];

@@ -576,5 +576,14 @@
   "addRecentOutput": "将最近输出加入对话",
   "addFilePathToChat": "将文件路径加入对话",
   "addDeliverableToChat": "将产出物加入对话",
-  "addedToChat": "已加入对话"
+  "addedToChat": "已加入对话",
+  "terminal": {
+    "desktopOnlyTitle": "内置终端仅在 Markus 桌面版可用",
+    "desktopOnlyDesc": "你当前使用的是网页版（浏览器访问）。若想在应用内直接使用终端，请下载并打开 Markus 桌面版。",
+    "createFailedTitle": "终端启动失败",
+    "createFailedDesc": "无法创建终端会话，请重试或重启应用。",
+    "searchPlaceholder": "在终端中查找…",
+    "searchNext": "下一个",
+    "jumpToBottom": "↓ 跳到最新"
+  }
 }

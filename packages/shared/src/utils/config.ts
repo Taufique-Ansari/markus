@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync, openSync, closeSync } from 'node:fs';
-import { resolve, join } from 'node:path';
-import { homedir } from 'node:os';
+import { resolve } from 'node:path';
 import type { CapabilityRoutingConfig } from '../types/model-catalog.js';
+import { markusConfigPath } from './config-paths.js';
 
 export interface MarkusConfig {
   org: {
@@ -13,6 +13,10 @@ export interface MarkusConfig {
     defaultModel: string;
     providers: Record<string, {
       apiKey?: string;
+      /** Name of the env var (in `~/.markus/.env`) that holds the apiKey. The
+       *  canonical form: the secret lives in the env store, the config only
+       *  references it by name (mirrors dsh `apiKeyEnv` / OpenClaw SecretRef). */
+      apiKeyEnv?: string;
       baseUrl?: string;
       model?: string;
       enabled?: boolean;
@@ -201,17 +205,24 @@ export interface MarkusConfig {
 const DEFAULT_CONFIG: MarkusConfig = {
   org: { id: 'default', name: 'My Organization' },
   llm: {
-    defaultProvider: 'anthropic',
+    // Factory default is Markus Cloud AI. A detected *environment* key
+    // (OPENAI_API_KEY, …) only makes a provider usable — it must never
+    // silently become the default; the user chooses a default explicitly.
+    defaultProvider: 'markus',
     defaultModel: 'claude-opus-5',
     providers: {},
   },
   server: { apiPort: 8056, webPort: 8057 },
-  security: { adminPassword: 'markus123', gatewaySecret: 'markus-gateway-default-secret-change-me' },
+  // NOTE: no default adminPassword / gatewaySecret here. Shipping a known
+  // literal would let anyone claim a fresh instance or sign gateway requests.
+  // Secrets are resolved at runtime (env var, or a random value persisted to
+  // ~/.markus/) — see @markus/shared/utils/secrets.
+  security: {},
   hub: { url: 'https://markus.global' },
 };
 
 export function getDefaultConfigPath(): string {
-  return join(homedir(), '.markus', 'markus.json');
+  return markusConfigPath();
 }
 
 export function loadConfig(configPath?: string): MarkusConfig {
@@ -310,7 +321,10 @@ function deepMerge(target: Obj, source: Obj): Obj {
       if (tv && typeof tv === 'object' && !Array.isArray(tv)) {
         result[key] = deepMerge(tv as Obj, sv as Obj);
       } else {
-        result[key] = sv;
+        // No existing object to merge into: still recurse with an empty target
+        // so nested `null`s in the source are honoured as deletions (the
+        // documented contract). Copying `sv` verbatim would leak `key: null`.
+        result[key] = deepMerge({}, sv as Obj);
       }
     } else {
       result[key] = sv;

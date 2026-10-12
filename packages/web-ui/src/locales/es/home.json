@@ -67,6 +67,7 @@
       "llm": "Configurar modelo de IA",
       "llmDesc": "Configurar la clave API de su proveedor de LLM — esto es necesario para que los agentes trabajen",
       "llmDescHub": "Use Markus Cloud AI, o agregue la clave de API de su propio proveedor, necesaria para que los agentes trabajen",
+      "llmDescConfigured": "Proveedor predeterminado actual: {{provider}}. Puede cambiarlo en cualquier momento en Ajustes.",
       "llmAction": "Configuración",
       "search": "Configurar el motor de búsqueda",
       "searchDesc": "Configurar una clave API de búsqueda para que los agentes puedan buscar en Internet",

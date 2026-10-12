@@ -2,7 +2,7 @@ import type { Command } from 'commander';
 import { resolve } from 'node:path';
 import { readFileSync, existsSync, cpSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { saveConfig, getDefaultConfigPath, APP_VERSION, PROVIDERS } from '@markus/shared';
+import { saveConfig, getDefaultConfigPath, APP_VERSION, PROVIDERS, persistProviderSecret } from '@markus/shared';
 import { resolveTemplatesDir } from '../paths.js';
 import { findConnector, scanInstalledPlatforms, readPlatformLLMProviders } from '../connector-service.js';
 
@@ -165,14 +165,16 @@ export async function quickInit(options?: InitOptions) {
     mode = 'manual';
   }
 
-  const providers: Record<string, { apiKey?: string; baseUrl?: string; model?: string; enabled?: boolean }> = {};
+  const providers: Record<string, { apiKeyEnv?: string; baseUrl?: string; model?: string; enabled?: boolean }> = {};
   let defaultProvider = '';
 
   if (mode === 'env') {
     for (const ep of envProviders) {
       const model = process.env[`${ep.provider.toUpperCase()}_MODEL`] ?? MODEL_MAP[ep.provider] ?? '';
       providers[ep.provider] = {
-        apiKey: ep.key,
+        // Found in the environment — store the reference (and mirror the value
+        // into the canonical secret store); never plaintext in markus.json.
+        apiKeyEnv: persistProviderSecret(ep.provider, ep.key),
         model,
         ...(ep.baseUrl ? { baseUrl: ep.baseUrl } : {}),
         enabled: true,
@@ -231,7 +233,7 @@ export async function quickInit(options?: InitOptions) {
           providers[name] = {
             ...(c.baseUrl ? { baseUrl: c.baseUrl as string } : {}),
             ...(c.model ? { model: c.model as string } : {}),
-            ...(c.apiKey ? { apiKey: c.apiKey as string } : {}),
+            ...(c.apiKey ? { apiKeyEnv: persistProviderSecret(name, c.apiKey as string) } : {}),
             enabled: true,
           };
         }
@@ -262,7 +264,7 @@ export async function quickInit(options?: InitOptions) {
           deepseek: 'https://api.deepseek.com',
         };
         providers[provider] = {
-          ...(apiKey ? { apiKey } : {}),
+          ...(apiKey ? { apiKeyEnv: persistProviderSecret(provider, apiKey) } : {}),
           model: MODEL_MAP[provider],
           ...(baseUrlMap[provider] ? { baseUrl: baseUrlMap[provider] } : {}),
           enabled: true,
@@ -286,7 +288,7 @@ export async function quickInit(options?: InitOptions) {
           deepseek: 'https://api.deepseek.com',
         };
         providers[provider] = {
-          ...(apiKey ? { apiKey } : {}),
+          ...(apiKey ? { apiKeyEnv: persistProviderSecret(provider, apiKey) } : {}),
           model: MODEL_MAP[provider],
           ...(baseUrlMap[provider] ? { baseUrl: baseUrlMap[provider] } : {}),
           enabled: true,

@@ -575,5 +575,14 @@
   "browserHistoryKeyboardHint": "↑↓ o Ctrl+N/P para seleccionar · Enter para abrir",
   "addFilePathToChat": "Añadir ruta de archivo al chat",
   "addDeliverableToChat": "Añadir entrega al chat",
-  "addedToChat": "Añadido al chat"
+  "addedToChat": "Añadido al chat",
+  "terminal": {
+    "desktopOnlyTitle": "La terminal integrada solo está disponible en Markus Desktop",
+    "desktopOnlyDesc": "Estás usando la versión web (abierta en el navegador). Para usar la terminal dentro de la app, descarga y abre Markus Desktop.",
+    "createFailedTitle": "No se pudo iniciar la terminal",
+    "createFailedDesc": "No se pudo crear la sesión de terminal. Inténtalo de nuevo o reinicia la app.",
+    "searchPlaceholder": "Buscar en la terminal…",
+    "searchNext": "Siguiente",
+    "jumpToBottom": "↓ Ir al final"
+  }
 }

@@ -15,7 +15,7 @@ import {
   type RoleTemplate,
   type HumanUser,
   type HumanRole,
-  isSecretaryLikeAgent, pickOrgSecretary,
+  isSecretaryLikeAgent, pickOrgSecretary, secretaryDisplayName, resolveHostLocale,
 } from '@markus/shared';
 import { RoleLoader, type AgentManager, type CreateAgentRequest, type SkillRegistry, discoverSkillsInDir, WELL_KNOWN_SKILL_DIRS, getAgentSkillWarnings } from '@markus/core';
 import type { StorageBridge } from './storage-bridge.js';
@@ -999,15 +999,22 @@ export class OrganizationService {
    * The Secretary is hired without a team — users create teams explicitly.
    * Skips if any agents already exist for the org.
    */
-  async seedDefaultTeam(orgId: string, _ownerUserId: string): Promise<void> {
+  async seedDefaultTeam(orgId: string, ownerUserId: string): Promise<void> {
     const existingAgents = this.agentManager.listAgents();
     if (existingAgents.length > 0) return; // Already has agents — nothing to seed
 
-    log.info('Seeding Secretary agent for org', { orgId });
+    // Localize the seeded Secretary's display name to the owner/host language,
+    // so a first-run user in a non-English environment doesn't meet an English
+    // label. Identification is unaffected (the `secretary` role template is the
+    // stable key; the name is only a display label).
+    const locale = this.resolveHumanIdentity(ownerUserId)?.locale ?? resolveHostLocale();
+    const name = secretaryDisplayName(locale);
+
+    log.info('Seeding Secretary agent for org', { orgId, locale, name });
 
     try {
       const secretary = await this.hireAgent({
-        name: 'Secretary',
+        name,
         roleName: 'secretary',
         orgId,
         agentRole: 'worker',

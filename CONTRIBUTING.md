@@ -104,7 +104,7 @@ pnpm dev
 
 - Web UI: http://localhost:8057
 - API: http://localhost:8056
-- Initial admin: `admin@markus.local` / `markus123` (the onboarding wizard will prompt you to set your own credentials)
+- Initial admin: `admin@markus.local` + a randomly generated bootstrap password (printed once to the console on first run / saved to `~/.markus/initial-admin-password`; the onboarding wizard will prompt you to set your own credentials)
 - Storage: SQLite by default — zero external dependencies. PostgreSQL is optional for production.
 
 **Requirements:** Node.js ≥ 22, pnpm ≥ 9. See `docs/guides/development.md` for exact setup on macOS / Linux / Windows.

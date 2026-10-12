@@ -449,13 +449,25 @@ export const MAILBOX_COALESCE_WINDOW_MS = 200;
 
 // ─── Mailbox Processing ─────────────────────────────────────────────────────
 
-/** Maximum time (ms) allowed for processing a single mailbox item.
- *  If processing exceeds this duration — typically caused by system sleep,
- *  network hang, or an unresponsive LLM provider — the item is requeued
- *  for retry and the attention loop continues.
- *  45 minutes covers long multimodal tools (e.g. video generation poll ~30m)
- *  plus LLM turns, while still catching genuine hangs. */
+/** Maximum **inactivity** (ms) tolerated while processing a single mailbox item.
+ *
+ *  Measured as time since the last sign of progress — any LLM output or tool
+ *  start/end, reported by the turn via `AttentionController.noteProgress()`
+ *  (wired from the agent's single activity-log hub). A turn that keeps producing
+ *  activity is NEVER interrupted, however long it runs; only a turn that goes
+ *  completely silent for this long is treated as hung — typically system sleep,
+ *  a network hang, or an unresponsive LLM provider — and the item is requeued.
+ *
+ *  History: this used to be a *total-duration* cap, which wrongly killed
+ *  legitimately long multi-tool turns (many short calls, none of them hung).
+ *  45 min of *silence* still comfortably covers long multimodal tools (e.g. a
+ *  video-generation poll ~30m) whose progress is reported on completion. */
 export const MAILBOX_PROCESSING_TIMEOUT_MS = 45 * 60 * 1000;
+
+/** Poll granularity (ms) for the mailbox inactivity backstop — bounds how late
+ *  the check may fire relative to the window. Shortened automatically for very
+ *  small (test) windows so the timeout still lands on time. */
+export const MAILBOX_INACTIVITY_POLL_MS = 30_000;
 
 /** Grace period (ms) after a backstop timeout during which the attention loop
  *  waits for the orphaned in-flight turn to actually settle before deciding

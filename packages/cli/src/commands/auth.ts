@@ -1,6 +1,6 @@
 import type { Command } from 'commander';
 import * as readline from 'node:readline';
-import { loadConfig, saveConfig, PROVIDERS } from '@markus/shared';
+import { loadConfig, saveConfig, PROVIDERS, persistProviderSecret } from '@markus/shared';
 
 // ─── Color constants ──────────────────────────────────────────────────────────
 
@@ -112,7 +112,10 @@ async function listAuth(): Promise<void> {
 ║                  ${C.CYAN}Markus Auth — Credential Pool${C.RESET}${C.BOLD}           ║
 ╚══════════════════════════════════════════════════════════════╝${C.RESET}\n`);
 
-  const configured = Object.entries(providers).filter(([, cfg]) => (cfg as any)?.apiKey && !isPlaceholder((cfg as any).apiKey));
+  const configured = Object.entries(providers).filter(([, cfg]) => {
+    const key = (cfg as any)?.apiKey ?? ((cfg as any)?.apiKeyEnv ? process.env[(cfg as any).apiKeyEnv] : undefined);
+    return key && !isPlaceholder(key);
+  });
   const envBacked = PROVIDERS.filter(p => !configured.some(([id]) => id === p.id) && process.env[p.envKey] && !isPlaceholder(process.env[p.envKey]!));
 
   if (configured.length === 0 && envBacked.length === 0) {
@@ -127,7 +130,8 @@ async function listAuth(): Promise<void> {
     const label = pdef?.label ?? id;
     const isDefault = id === defaultProv;
     const model = (cfg as any).model ?? '';
-    const key = (cfg as any).apiKey ?? '';
+    const envName = (cfg as any).apiKeyEnv as string | undefined;
+    const key = ((cfg as any).apiKey as string) ?? (envName ? process.env[envName] : undefined) ?? '';
     const keyLabel = (cfg as any).apiKeyLabel ?? 'primary';
     const exhausted = (cfg as any).exhausted;
     const key2 = (cfg as any).apiKey2;
@@ -222,11 +226,13 @@ async function addAuth(
   // Save
   const config = loadConfig(undefined);
   const existing = config.llm?.providers?.[provider] ?? {};
-  const isFirstKey = !existing.apiKey || isPlaceholder(existing.apiKey as string);
+  const isFirstKey = !(existing.apiKey || (existing as { apiKeyEnv?: string }).apiKeyEnv);
 
-  const updated = {
+  const updated: Record<string, unknown> = {
     ...existing,
-    apiKey,
+    // Secret → canonical store; the config keeps only the env-var reference.
+    apiKeyEnv: persistProviderSecret(provider, apiKey),
+    apiKey: null, // drop any legacy plaintext from markus.json (deepMerge deletes null)
     apiKeyLabel: label,
     model: model || (existing as any).model || pdef.defaultModel,
     ...(pdef.baseUrl ? { baseUrl: pdef.baseUrl } : {}),

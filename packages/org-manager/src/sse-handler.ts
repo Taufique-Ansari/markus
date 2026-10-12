@@ -75,8 +75,10 @@ export class SSEHandler {
   private streamId = randomUUID();
   private assistantMessageId: string;
   private activeStream: ActiveStreamSession | null = null;
-  private forceStopTimer: ReturnType<typeof setTimeout> | null = null;
+  private forceStopTimer: ReturnType<typeof setInterval> | null = null;
   private snapshotSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 断连时刻（ms）——progress-aware 宽限的下界。 */
+  private disconnectAtMs: number | null = null;
 
   constructor(options: SSEMessageHandlerOptions) {
     this.options = options;
@@ -128,12 +130,29 @@ export class SSEHandler {
           });
           void this.persistPartialOnDisconnect();
 
-          if (this.forceStopTimer) clearTimeout(this.forceStopTimer);
-          this.forceStopTimer = setTimeout(() => {
-            if (!this.isComplete && !this.cancelToken.userStopped) {
-              log.warn('Force-stopping agent after SSE disconnect grace period', {
+          if (this.forceStopTimer) clearInterval(this.forceStopTimer);
+          this.disconnectAtMs = Date.now();
+          // Progress-aware grace (was a fixed post-disconnect deadline): keep the
+          // detached agent alive while it is still producing activity; force-stop
+          // only after it has been SILENT for the window. Mirrors the mailbox
+          // inactivity backstop, so a legitimately long turn is never killed just
+          // because the user navigated away.
+          const disconnectWindowMs = SSE_DISCONNECT_FORCE_STOP_MS;
+          const disconnectPollMs = Math.max(50, Math.min(60_000, Math.floor(disconnectWindowMs / 4)));
+          this.forceStopTimer = setInterval(() => {
+            if (this.isComplete || this.cancelToken.userStopped) {
+              if (this.forceStopTimer) clearInterval(this.forceStopTimer);
+              this.forceStopTimer = null;
+              return;
+            }
+            const silentFor = Date.now() - this.lastProgressMs();
+            if (silentFor >= disconnectWindowMs) {
+              if (this.forceStopTimer) clearInterval(this.forceStopTimer);
+              this.forceStopTimer = null;
+              log.warn('Force-stopping detached agent after SSE disconnect inactivity window', {
                 agentId: this.options.agentId,
-                graceMs: SSE_DISCONNECT_FORCE_STOP_MS,
+                inactiveMs: silentFor,
+                windowMs: disconnectWindowMs,
               });
               this.cancelToken.cancelled = true;
               this.cancelToken.userStopped = true;
@@ -144,7 +163,8 @@ export class SSEHandler {
                 sessionId: this.sessionId,
               });
             }
-          }, SSE_DISCONNECT_FORCE_STOP_MS);
+          }, disconnectPollMs);
+          if (typeof this.forceStopTimer.unref === 'function') this.forceStopTimer.unref();
         }
       });
 
@@ -375,7 +395,7 @@ export class SSEHandler {
 
       this.isComplete = true;
       if (this.forceStopTimer) {
-        clearTimeout(this.forceStopTimer);
+        clearInterval(this.forceStopTimer);
         this.forceStopTimer = null;
       }
       
@@ -440,10 +460,23 @@ export class SSEHandler {
     } finally {
       this.isProcessing = false;
       if (this.forceStopTimer) {
-        clearTimeout(this.forceStopTimer);
+        clearInterval(this.forceStopTimer);
         this.forceStopTimer = null;
       }
     }
+  }
+
+  /**
+   * Last observed progress time (ms) for the in-flight turn, from the agent's own
+   * activity heartbeat (`state.lastProgressAt`, set on every LLM/tool event).
+   * Falls back to the disconnect time so a turn that never reports anything still
+   * honours a bounded grace instead of hanging forever.
+   */
+  private lastProgressMs(): number {
+    const raw = this.options.agent.getState().lastProgressAt;
+    const parsed = raw ? Date.parse(raw) : NaN;
+    const progress = Number.isFinite(parsed) ? parsed : 0;
+    return Math.max(progress, this.disconnectAtMs ?? 0);
   }
 
   /** Emit to live SSE (if connected) and always to the reattach ring buffer. */

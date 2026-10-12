@@ -1,4 +1,4 @@
-import { createLogger } from '@markus/shared';
+import { createLogger, resolveJwtSecret } from '@markus/shared';
 import { WebSocket } from 'ws';
 import { request as httpRequest, type IncomingMessage } from 'node:http';
 import { request as httpsRequest } from 'node:https';
@@ -625,7 +625,7 @@ export class RemoteAccessAgent {
   }
 
   private generateMarkusToken(): string {
-    const secret = this.config.jwtSecret ?? process.env['JWT_SECRET'] ?? 'markus-dev-secret-change-in-prod';
+    const secret = this.config.jwtSecret ?? resolveJwtSecret();
     const exp = Math.floor(Date.now() / 1000) + 24 * 3600;
     const userId = this.localOwnerUserId ?? 'remote_owner';
     return signJwt({ userId, orgId: 'default', role: 'owner', exp }, secret);

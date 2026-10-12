@@ -576,5 +576,14 @@
   "addRecentOutput": "Add recent output to chat",
   "addFilePathToChat": "Add file path to chat",
   "addDeliverableToChat": "Add deliverable to chat",
-  "addedToChat": "Added to chat"
+  "addedToChat": "Added to chat",
+  "terminal": {
+    "desktopOnlyTitle": "The built-in terminal is only available in Markus Desktop",
+    "desktopOnlyDesc": "You're using the web version (opened in a browser). To use the terminal inside the app, download and open Markus Desktop.",
+    "createFailedTitle": "Couldn't start the terminal",
+    "createFailedDesc": "The terminal session couldn't be created. Try again or restart the app.",
+    "searchPlaceholder": "Find in terminal…",
+    "searchNext": "Next",
+    "jumpToBottom": "↓ Jump to latest"
+  }
 }

@@ -295,8 +295,8 @@ export function Login({ onLogin, hasOwner }: HubLoginProps) {
                   </div>
                 )}
 
-                {/* Default password hint only while placeholder admin is unclaimed.
-                    After first claim, hasOwner=true — showing markus123 is misleading. */}
+                {/* Bootstrap-password hint only while placeholder admin is unclaimed.
+                    After first claim, hasOwner=true — the bootstrap password is invalid. */}
                 {!hasOwner && (
                   <p className="text-[11px] text-fg-tertiary">{t('login.defaultCredentials')}</p>
                 )}

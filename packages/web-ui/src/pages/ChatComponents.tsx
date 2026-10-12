@@ -605,8 +605,16 @@ export function lastTextBlockIndex(blocks: ChatTimelineBlock[]): number {
  * 只在**这轮已经结束**时才折：流式期间逐段展开正是「生成中与生成完气泡等高」的
  * 前提；中途把已经产出的内容收走，会让用户正在盯的东西突然消失。
  */
-export function collapsibleBlockCount(blocks: ChatTimelineBlock[], isStreaming: boolean): number {
-  if (isStreaming) return 0;
+export function collapsibleBlockCount(
+  blocks: ChatTimelineBlock[],
+  isStreaming: boolean,
+  interrupted = false,
+): number {
+  // 流式期间不折（正在产出的内容不能被收走）。
+  // 用户手动中止 / 异常结束时也不折 —— 这不是一次正常交付，把它压成「只剩
+  // 最后一条正文」会丢掉真正的上下文（agent 到底做了哪些步骤）；这类回合应
+  // 该原样展示完整过程（正文常显、过程行各自折叠）。
+  if (isStreaming || interrupted) return 0;
   const idx = lastTextBlockIndex(blocks);
   return idx > 0 ? idx : 0;
 }
@@ -674,7 +682,7 @@ export function ProcessRunIcon({ state }: { state: ProcessRunState }) {
  * 前后不像同一条消息。全程折叠后，气泡在「生成中」和「生成完」基本等高，
  * 信息一条没少 —— 想看随时点开。
  */
-function ProcessRun({
+export function ProcessRun({
   entries,
   summary,
   isStreaming,
@@ -796,6 +804,50 @@ const running = !!(isStreaming && (isLastBlock || summary.running)) || !!reconne
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── ProcessTimeline — 一段执行记录按聊天气泡的形态渲染 ─────────────────────────
+//
+// 任何「agent 的执行历史」（任务执行日志、心跳/A2A 活动日志、mailbox 消息处理
+// 日志）都用这一套：正文各自成段正常展示，连续的思考/工具折成一行 ProcessRun，
+// 点开才是明细。以前这三种日志各写各的平铺渲染（FullExecutionLog 把每一行都摊开），
+// 又长又密；统一到这里后，形态与 Team Chat 的气泡一致，也只剩一个实现。
+//
+// 为什么不在这里处理评论：评论只出现在任务日志里，且需要 agents/头像上下文，
+// 由调用方在相邻的时间片段之间插入（见 Work.tsx 的 TaskLogTimeline）。
+export function ProcessTimeline({
+  entries,
+  isStreaming,
+  streamingText,
+  className,
+}: {
+  entries: ExecutionStreamEntryUI[];
+  /** 这一轮还在进行中（影响最后一个过程块的「输出中」反馈）。 */
+  isStreaming: boolean;
+  /** 仍在流式输出、尚未落进 entries 的正文（任务日志的 delta）。 */
+  streamingText?: string;
+  className?: string;
+}) {
+  const blocks = useMemo(() => groupProcessRuns(entries), [entries]);
+
+  return (
+    <div className={`space-y-2 min-w-0 overflow-x-hidden ${className ?? ''}`}>
+      {blocks.map((block, i) => block.kind === 'text' ? (
+        block.entry.content.trim() ? (
+          <MarkdownMessage key={block.key} content={block.entry.content} />
+        ) : null
+      ) : (
+        <ProcessRun
+          key={block.key}
+          entries={block.entries}
+          summary={block.summary}
+          isStreaming={isStreaming}
+          isLastBlock={isStreaming && i === blocks.length - 1}
+        />
+      ))}
+      {isStreaming && streamingText ? <MarkdownMessage content={streamingText} /> : null}
     </div>
   );
 }
@@ -1040,7 +1092,9 @@ export const AgentMessageBody = memo(function AgentMessageBody({
     const hasTextBlock = blocks.some(b => b.kind === 'text');
     // 这轮结束后，最终结果（最后一个正文块）之前的全部块整体折进顶部一行，
     // 气泡只剩「已工作 X 秒」+ 最终结论 —— 这就是「降低气泡高度」的来源。
-    const hideCount = collapsibleBlockCount(blocks, isStreaming);
+    // 中断/异常结束的回合不折叠 —— 见 collapsibleBlockCount 的说明。
+    const interrupted = !!(isStopped || msg.isError);
+    const hideCount = collapsibleBlockCount(blocks, isStreaming, interrupted);
     const offset = hideCount > 0 && !showFullHistory ? hideCount : 0;
     const workedLabel = formatWorkedFor(entriesElapsedMs(fullLogEntries), t);
 

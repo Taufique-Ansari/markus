@@ -7,10 +7,11 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import {
   createLogger,
   getTextContent,
+  markusPath,
   type LLMMessage,
   type LLMProviderConfig,
   type LLMRequest,
@@ -610,7 +611,7 @@ export class MarkusProvider implements MultiModalProviderInterface {
     const env = process.env['MARKUS_HUB_TOKEN'] || '';
     if (env) return env;
     try {
-      const tokenPath = join(homedir(), '.markus', 'hub-token');
+      const tokenPath = markusPath('hub-token');
       if (existsSync(tokenPath)) return readFileSync(tokenPath, 'utf-8').trim();
     } catch { /* ignore */ }
     return '';
@@ -1525,7 +1526,7 @@ export class MarkusProvider implements MultiModalProviderInterface {
 
   private generatedDir(kind: 'images' | 'videos' | 'audio'): string {
     try {
-      const dir = join(homedir(), '.markus', 'generated', kind);
+      const dir = markusPath('generated', kind);
       mkdirSync(dir, { recursive: true });
       return dir;
     } catch {

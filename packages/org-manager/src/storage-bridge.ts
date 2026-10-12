@@ -1,4 +1,4 @@
-import { createLogger } from '@markus/shared';
+import { createLogger, markusDbPath } from '@markus/shared';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -57,7 +57,7 @@ function resolveSqlitePath(url?: string): string {
     }
     return p;
   }
-  return join(homedir(), '.markus', 'data.db');
+  return markusDbPath();
 }
 
 export async function initStorage(databaseUrl?: string): Promise<StorageBridge | null> {

@@ -56,8 +56,9 @@ export function isGreenfieldLlmConfig(llm: LlmConfigSnapshot): boolean {
   }
 
   const dp = llm.defaultProvider;
-  // Factory default in DEFAULT_CONFIG is `anthropic`. Anything else (except
-  // markus / empty) means the user already chose a provider.
+  // Factory default in DEFAULT_CONFIG is `markus` (legacy installs may still
+  // carry the old `anthropic` sentinel). Anything else (except empty) means the
+  // user already chose a provider.
   if (dp && dp !== 'anthropic' && dp !== 'markus') return false;
 
   if (llm.routingDefaultModel?.provider && llm.routingDefaultModel?.model) {

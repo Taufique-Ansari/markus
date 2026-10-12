@@ -30,6 +30,10 @@ vi.mock('@markus/shared', async (importOriginal) => {
       agent: {},
     })),
     saveConfig: vi.fn(),
+    // Secret store is now the canonical home for all secrets; mock it so the
+    // tests can assert the wiring without touching the real ~/.markus/.env.
+    setEnvValue: vi.fn(),
+    unsetEnvValue: vi.fn(),
   };
 });
 
@@ -1483,21 +1487,34 @@ describe('APIServer route handlers', () => {
       expect(res.status).toBe(200);
     });
 
-    it('GET /api/settings/org returns local preferred org name', async () => {
+    it('GET /api/settings/org returns the DB org (canonical), not the config seed', async () => {
       const res = await request(ctx.server, 'GET', '/api/settings/org');
       expect(res.status).toBe(200);
-      expect(res.json.org).toEqual({ id: 'default', name: 'My Organization' });
+      // DB is canonical (mock org = 'Default Org'); markus.json org.name is a
+      // one-time seed only, so it must not win.
+      expect(res.json.org).toEqual({ id: 'default', name: 'Default Org' });
     });
 
-    it('PUT /api/settings/org persists preferred org name', async () => {
+    it('PUT /api/settings/org renames the DB org — single writer, no file write', async () => {
       const shared = await import('@markus/shared');
       vi.mocked(shared.saveConfig).mockClear();
       const res = await request(ctx.server, 'PUT', '/api/settings/org', { name: 'Acme Team' });
       expect(res.status, JSON.stringify(res.json)).toBe(200);
       expect(res.json).toMatchObject({ ok: true, org: { id: 'default', name: 'Acme Team' } });
-      expect(vi.mocked(shared.saveConfig)).toHaveBeenCalled();
-      const saved = vi.mocked(shared.saveConfig).mock.calls.at(-1)?.[0] as { org?: { name?: string } };
-      expect(saved?.org?.name).toBe('Acme Team');
+      // DB is canonical; markus.json must NOT be written (no duplication).
+      expect(vi.mocked(shared.saveConfig)).not.toHaveBeenCalled();
+    });
+
+    it('POST /api/settings/search stores keys in the secret env store, never markus.json', async () => {
+      const shared = await import('@markus/shared');
+      vi.mocked(shared.saveConfig).mockClear();
+      vi.mocked(shared.setEnvValue).mockClear();
+      const res = await request(ctx.server, 'POST', '/api/settings/search', { serpApiKey: 'serp-secret' });
+      expect(res.status).toBe(200);
+      expect(vi.mocked(shared.setEnvValue)).toHaveBeenCalledWith('SERPAPI_API_KEY', 'serp-secret');
+      const saved = vi.mocked(shared.saveConfig).mock.calls.at(-1)?.[0] as { integrations?: { search?: Record<string, unknown> } };
+      expect(saved?.integrations?.search?.serpApiKey).toBeNull(); // legacy plaintext stripped
+      expect(saved?.integrations?.search?.serpApiKey).not.toBe('serp-secret');
     });
 
     it('POST /api/settings/hub-token', async () => {

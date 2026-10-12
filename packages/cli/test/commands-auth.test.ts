@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Command } from 'commander';
@@ -14,6 +14,8 @@ describe('auth command', () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'markus-auth-cmd-'));
     configPath = join(tmpDir, 'markus.json');
+    // Isolate the canonical secret store (~/.markus/.env) to the temp dir.
+    vi.stubEnv('MARKUS_HOME', tmpDir);
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     const origLoad = shared.loadConfig;
@@ -38,8 +40,15 @@ describe('auth command', () => {
     logSpy.mockRestore();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     rmSync(tmpDir, { recursive: true, force: true });
   });
+
+  /** The canonical secret store (~/.markus/.env) under the temp MARKUS_HOME. */
+  function readEnvFile(): string {
+    const p = join(tmpDir, '.env');
+    return existsSync(p) ? readFileSync(p, 'utf-8') : '';
+  }
 
   function runAuth(args: string[]): Promise<void> {
     const program = new Command();
@@ -91,7 +100,9 @@ describe('auth command', () => {
       '--no-validate',
     ]);
     const cfg = shared.loadConfig(configPath);
-    expect(cfg.llm?.providers?.openai?.apiKey).toBe('sk-testkey1234567890');
+    expect(cfg.llm?.providers?.openai?.apiKey).toBeUndefined();
+    expect(cfg.llm?.providers?.openai?.apiKeyEnv).toBe('OPENAI_API_KEY');
+    expect(readEnvFile()).toContain('OPENAI_API_KEY=sk-testkey1234567890');
     expect(cfg.llm?.providers?.openai?.apiKeyLabel).toBe('primary');
   });
 
@@ -295,7 +306,8 @@ describe('auth command', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200 }));
     await runAuth(['add', 'anthropic', '--key', 'sk-anthropic1234567890']);
     const cfg = shared.loadConfig(configPath);
-    expect(cfg.llm?.providers?.anthropic?.apiKey).toBe('sk-anthropic1234567890');
+    expect(cfg.llm?.providers?.anthropic?.apiKey).toBeUndefined();
+    expect(readEnvFile()).toContain('ANTHROPIC_API_KEY=sk-anthropic1234567890');
   });
 
   it('list shows env-backed providers', async () => {

@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Command } from 'commander';
@@ -13,6 +13,9 @@ describe('model command', () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'markus-model-cmd-'));
     configPath = join(tmpDir, 'markus.json');
+    // Isolate the canonical secret store (~/.markus/.env) to the temp dir so the
+    // command never writes test keys into the developer's real home.
+    vi.stubEnv('MARKUS_HOME', tmpDir);
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     const origLoad = shared.loadConfig;
@@ -39,8 +42,15 @@ describe('model command', () => {
     logSpy.mockRestore();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     rmSync(tmpDir, { recursive: true, force: true });
   });
+
+  /** The canonical secret store under the temp MARKUS_HOME. */
+  function readEnvFile(): string {
+    const p = join(tmpDir, '.env');
+    return existsSync(p) ? readFileSync(p, 'utf-8') : '';
+  }
 
   function runModel(args: string[]): Promise<void> {
     const program = new Command();
@@ -71,7 +81,9 @@ describe('model command', () => {
     expect(output).toMatch(/OK|Saved/);
 
     const cfg = shared.loadConfig(configPath);
-    expect(cfg.llm?.providers?.openai?.apiKey).toBe('sk-testkey1234567890');
+    expect(cfg.llm?.providers?.openai?.apiKey).toBeUndefined();
+    expect(cfg.llm?.providers?.openai?.apiKeyEnv).toBe('OPENAI_API_KEY');
+    expect(readEnvFile()).toContain('OPENAI_API_KEY=sk-testkey1234567890');
     expect(cfg.llm?.defaultProvider).toBe('openai');
   });
 
@@ -134,7 +146,8 @@ describe('model command', () => {
     const output = logSpy.mock.calls.map(c => String(c[0])).join('\n');
     expect(output).toMatch(/OK/);
     const cfg = shared.loadConfig(configPath);
-    expect(cfg.llm?.providers?.anthropic?.apiKey).toBe('sk-anthropic1234567890');
+    expect(cfg.llm?.providers?.anthropic?.apiKey).toBeUndefined();
+    expect(readEnvFile()).toContain('ANTHROPIC_API_KEY=sk-anthropic1234567890');
   });
 
   it('reports rate limit failure for anthropic validation', async () => {
@@ -186,6 +199,7 @@ describe('model command', () => {
     ]);
     const cfg = shared.loadConfig(configPath);
     expect(cfg.llm?.defaultProvider).toBe('anthropic');
-    expect(cfg.llm?.providers?.openai?.apiKey).toBe('sk-testkey1234567890');
+    expect(cfg.llm?.providers?.openai?.apiKey).toBeUndefined();
+    expect(readEnvFile()).toContain('OPENAI_API_KEY=sk-testkey1234567890');
   });
 });

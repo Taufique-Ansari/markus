@@ -1,8 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createLogger, type CatalogModel, type CatalogStatus, type LiteLLMRawModelEntry } from '@markus/shared';
+import { createLogger, markusHome, type CatalogModel, type CatalogStatus, type LiteLLMRawModelEntry } from '@markus/shared';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -80,7 +79,7 @@ export class ModelCatalogService {
   private lastFailureAt = 0;
 
   constructor(options?: { mirrorUrl?: string }) {
-    this.markusDir = join(homedir(), '.markus');
+    this.markusDir = markusHome();
     this.mirrorUrl = options?.mirrorUrl;
   }
 

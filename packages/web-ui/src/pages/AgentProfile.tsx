@@ -5,7 +5,7 @@ import { api, wsClient, hubApi, kebab } from '../api.ts';
 import type { AgentDetail, AgentToolInfo, AgentMemorySummary, AgentHeartbeatInfo, TaskInfo, TaskLogEntry, AgentUsageInfo, ExternalAgentInfo, ActivitySummary, AgentActivityLogEntry, ActivityRecord, AgentActivityType, RoleUpdateStatus, StorageAgentItem, AuthUser, DeliverableInfo } from '../api.ts';
 import { navBus } from '../navBus.ts';
 import { PAGE } from '../routes.ts';
-import { ExecEntryRow, StreamingText, filterCompletedStarts, attachSubagentLogsToEntries, CompactExecutionCard, FullExecutionLog, type ExecEntry, type ToolCallInfo, type ExecutionStreamEntryUI } from '../components/ExecutionTimeline.tsx';
+import { ExecEntryRow, StreamingText, filterCompletedStarts, attachSubagentLogsToEntries, type ExecEntry, type ToolCallInfo, type ExecutionStreamEntryUI } from '../components/ExecutionTimeline.tsx';
 import { taskLogToStreamEntry, activityLogToStreamEntry } from '../api.ts';
 import { resolveTokensToday, visibleStorageBuckets, storageBucketLabelKey, agentStatusPresentation, recentActivityRows, splitRecentActivity, RECENT_ACTIVITY_FETCH_LIMIT, OVERVIEW_SECTION_IDS, resolveOverviewSection, deliverableClickTarget, type OverviewSectionId } from '../lib/agentOverview.ts';
 import { MarkdownMessage } from '../components/MarkdownMessage.tsx';
@@ -13,7 +13,7 @@ import { useSwipeTabs } from '../hooks/useSwipeTabs.ts';
 import { useIsMobile } from '../hooks/useIsMobile.ts';
 import { Avatar } from '../components/Avatar.tsx';
 import { ConfirmModal } from '../components/ConfirmModal.tsx';
-import { friendlyAgentError } from './ChatComponents.tsx';
+import { friendlyAgentError, ProcessTimeline } from './ChatComponents.tsx';
 import { DELIVERABLE_TYPE_META, DELIVERABLE_STATUS_META } from '../components/DeliverableDetailModal.tsx';
 import { getToolMeta } from '../components/execution-utils.ts';
 import { categorizeTools } from '../lib/toolCategories.ts';
@@ -317,6 +317,9 @@ function OverviewTab({ agent, onUpdate, externalInfo, t, canManageAgents, highli
   const [activeTasks, setActiveTasks] = useState<TaskInfo[]>([]);
   // 排队消息数（mailbox 待处理）——用于 working 但无执行中任务时说明「在哪忙」
   const [queuedCount, setQueuedCount] = useState(0);
+  // 懒加载分组的加载态：避免在请求进行中短暂闪出「暂无数据」的误导空态。
+  const [loadingStorage, setLoadingStorage] = useState(false);
+  const [loadingActivities, setLoadingActivities] = useState(false);
 
   // 概览子 tab（原先是折叠块）。落组规则见 resolveOverviewSection：
   // highlightMailboxId 优先（它指向的 mailbox 项只存在于「运行与注意力」），
@@ -331,24 +334,15 @@ function OverviewTab({ agent, onUpdate, externalInfo, t, canManageAgents, highli
   }, [initialSection, highlightMailboxId]);
 
   // `agent.state.activeTaskIds` 每次 reload 都是新数组，直接把它当依赖会让这个
-  // effect（内含 5 个请求，包括整组织目录扫描）在每次父组件重渲染时重跑。按内容做 key。
+  // effect（内含若干请求）在每次父组件重渲染时重跑。按内容做 key。
   const activeTaskIdsKey = (agent.state.activeTaskIds ?? []).join(',');
 
+  // 立即可见的数据（都很快）：用量计数器、在跑的任务、mailbox 排队数。
+  // 与下面两个「重活」分开，好让概览一打开就出内容。
   useEffect(() => {
     api.usage.agents().then(d => {
       const info = d.agents.find(a => a.agentId === agent.id);
       if (info) setUsageInfo(info);
-    }).catch(() => {});
-    // 【为什么不用 /recent-activities】该接口返回的是 liveActivities()——内存中
-    // 「此刻正在执行」的活动。它没有历史：agent 一空闲就返回空数组，于是标题写着
-    // 「最近活动」的卡片只在 agent 正在干活时才有内容。持久化历史一直在写
-    // （agent_activities 表），只是从来没被这个面板读过。
-    api.agents.getActivities(agent.id, { limit: RECENT_ACTIVITY_FETCH_LIMIT })
-      .then(d => setRecentActivities(d.activities)).catch(() => {});
-    api.system.storage().then(info => {
-      setAgentDataDir(info.dataDir + '/agents/' + agent.id);
-      const match = info.agents.find(a => a.id === agent.id);
-      if (match) setAgentStorage(match);
     }).catch(() => {});
     if (agent.state.activeTaskIds?.length) {
       api.tasks.list({ assignedAgentId: agent.id }).then(d => {
@@ -360,6 +354,39 @@ function OverviewTab({ agent, onUpdate, externalInfo, t, canManageAgents, highli
       setQueuedCount(mb.queued?.length ?? 0);
     }).catch(() => {});
   }, [agent.id, activeTaskIdsKey, agent.state.status]);
+
+  // 【为什么懒加载到「用量」分组才拉】/api/system/storage 会遍历整个数据目录
+  // （每个 agent 的子目录都扫一遍，实测 1.4s、60KB+），而**只有「用量」分组**渲染它。
+  // 旧实现挂在挂载时就发，切到概览要先等这一发——看着就是「卡半天」。
+  useEffect(() => {
+    if (section !== 'usage') return;
+    let cancelled = false;
+    setLoadingStorage(true);
+    api.system.storage().then(info => {
+      if (cancelled) return;
+      setAgentDataDir(info.dataDir + '/agents/' + agent.id);
+      const match = info.agents.find(a => a.id === agent.id);
+      if (match) setAgentStorage(match);
+    }).catch(() => {}).finally(() => { if (!cancelled) setLoadingStorage(false); });
+    return () => { cancelled = true; };
+  }, [section, agent.id]);
+
+  // 【为什么懒加载到「最近活动」分组才拉】这是**持久化**活动历史（agent_activities
+  // 表，可能上百条、几十 KB），同样只有「最近活动」分组渲染它。
+  // 【为什么不用 /recent-activities】该接口返回的是 liveActivities()——内存中
+  // 「此刻正在执行」的活动。它没有历史：agent 一空闲就返回空数组，于是标题写着
+  // 「最近活动」的卡片只在 agent 正在干活时才有内容。持久化历史一直在写
+  // （agent_activities 表），只是从来没被这个面板读过。
+  useEffect(() => {
+    if (section !== 'recent') return;
+    let cancelled = false;
+    setLoadingActivities(true);
+    api.agents.getActivities(agent.id, { limit: RECENT_ACTIVITY_FETCH_LIMIT })
+      .then(d => { if (!cancelled) setRecentActivities(d.activities); })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setLoadingActivities(false); });
+    return () => { cancelled = true; };
+  }, [section, agent.id]);
 
   const toggleAgent = () => {
     if (agent.state.status === 'offline') api.agents.start(agent.id).then(onUpdate);
@@ -592,6 +619,8 @@ function OverviewTab({ agent, onUpdate, externalInfo, t, canManageAgents, highli
                   </div>
                 )}
               </div>
+          ) : loadingStorage ? (
+            <p className="text-xs text-fg-tertiary">{t('common:loading')}</p>
           ) : (
             <p className="text-xs text-fg-tertiary">{t('agent:profilePage.overview.sections.usage.empty')}</p>
           )}
@@ -627,7 +656,9 @@ function OverviewTab({ agent, onUpdate, externalInfo, t, canManageAgents, highli
             </div>
           )}
           {heartbeats.total === 0 && comms.total === 0 && (
-            <p className="text-xs text-fg-tertiary">{t('agent:profilePage.overview.sections.recent.empty')}</p>
+            loadingActivities
+              ? <p className="text-xs text-fg-tertiary">{t('common:loading')}</p>
+              : <p className="text-xs text-fg-tertiary">{t('agent:profilePage.overview.sections.recent.empty')}</p>
           )}
         </SectionPanel>
       )}
@@ -871,7 +902,8 @@ function FilesTab({ agentId }: { agentId: string }) {
   const [pathCopied, setPathCopied] = useState(false);
 
   useEffect(() => {
-    api.system.storage().then(info => {
+    // 这里只要 role 目录路径（一个常量），不要触发 org 级目录扫描——用轻量端点。
+    api.system.info().then(info => {
       setRoleDir(info.dataDir + '/agents/' + agentId + '/role');
     }).catch(() => {});
   }, [agentId]);
@@ -1919,7 +1951,6 @@ function TaskLog({ taskId, isLive }: { taskId: string; isLive: boolean }) {
   const [logs, setLogs] = useState<TaskLogEntry[]>([]);
   const [streamingText, setStreamingText] = useState('');
   const [loading, setLoading] = useState(true);
-  const [viewMode, setViewMode] = useState<'compact' | 'full'>('compact');
 
   useEffect(() => {
     setLoading(true); setStreamingText('');
@@ -1947,15 +1978,10 @@ function TaskLog({ taskId, isLive }: { taskId: string; isLive: boolean }) {
   if (logs.length === 0 && !streamingText) return <div className="px-4 py-3 text-xs text-fg-tertiary">{t('profilePage.taskLog.noLogs')}</div>;
 
   const streamEntries: ExecutionStreamEntryUI[] = logs.map(l => taskLogToStreamEntry(l));
-  const hasMultipleRounds = new Set(streamEntries.filter(e => e.executionRound != null).map(e => e.executionRound!)).size > 1;
 
   return (
     <div className="px-3 py-2">
-      {viewMode === 'compact' ? (
-        <CompactExecutionCard entries={streamEntries} streamingText={streamingText} isActive={isLive} onExpand={() => setViewMode('full')} showRounds={hasMultipleRounds} />
-      ) : (
-        <FullExecutionLog entries={streamEntries} streamingText={streamingText} isActive={isLive} onCollapse={() => setViewMode('compact')} showRounds={hasMultipleRounds} />
-      )}
+      <ProcessTimeline entries={streamEntries} isStreaming={isLive} streamingText={streamingText} />
     </div>
   );
 }
@@ -1967,7 +1993,6 @@ function ActivityLog({ agentId, activityId, isLive = false }: { agentId: string;
   const { t } = useTranslation('agent');
   const [logs, setLogs] = useState<AgentActivityLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
-  const [viewMode, setViewMode] = useState<'compact' | 'full'>('compact');
 
   useEffect(() => {
     setLoading(true);
@@ -2003,11 +2028,7 @@ function ActivityLog({ agentId, activityId, isLive = false }: { agentId: string;
 
   return (
     <div className="px-3 py-2">
-      {viewMode === 'compact' ? (
-        <CompactExecutionCard entries={streamEntries} isActive={isLive} onExpand={() => setViewMode('full')} />
-      ) : (
-        <FullExecutionLog entries={streamEntries} isActive={isLive} onCollapse={() => setViewMode('compact')} />
-      )}
+      <ProcessTimeline entries={streamEntries} isStreaming={isLive} />
     </div>
   );
 }

@@ -53,7 +53,9 @@ describe('quickInit interactive mode', () => {
     expect(existsSync(configPath)).toBe(true);
     const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(cfg.llm.defaultProvider).toBe('deepseek');
-    expect(cfg.llm.providers.deepseek.apiKey).toBe('sk-deepseek1234567890');
+    expect(cfg.llm.providers.deepseek.apiKey).toBeUndefined();
+    expect(cfg.llm.providers.deepseek.apiKeyEnv).toBe('DEEPSEEK_API_KEY');
+    expect(readFileSync(join(tmpHome, '.markus', '.env'), 'utf-8')).toContain('DEEPSEEK_API_KEY=sk-deepseek1234567890');
     expect(cfg.server.apiPort).toBe(9001);
     expect(closeMock).toHaveBeenCalled();
     delete process.env.DEEPSEEK_API_KEY;
@@ -83,7 +85,8 @@ describe('quickInit interactive mode', () => {
     await quickInit();
 
     const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(cfg.llm.providers.openai.apiKey).toBe('sk-interactive123456789');
+    expect(cfg.llm.providers.openai.apiKey).toBeUndefined();
+    expect(readFileSync(join(tmpHome, '.markus', '.env'), 'utf-8')).toContain('OPENAI_API_KEY=sk-interactive123456789');
     expect(cfg.server.apiPort).toBe(9100);
     delete process.env.OPENAI_API_KEY;
   });

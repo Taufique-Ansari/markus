@@ -155,4 +155,47 @@ describe('SSEHandler', () => {
     await handler.handle(res);
     expect(res.body.length).toBeGreaterThan(0);
   });
+
+  it('progress-aware disconnect grace: keeps a busy detached agent alive, stops a silent one', async () => {
+    // The agent keeps working after the client leaves. The old fixed 45-min deadline
+    // killed it regardless; the new rule only force-stops after SILENCE for the window.
+    let capturedToken: { cancelled: boolean; userStopped?: boolean } | undefined;
+    let progressAt = Date.now();
+    const agent = createAgent({
+      sendMessageStream: vi.fn(async (_text, onEvent, _senderId, _info, token) => {
+        capturedToken = token as { cancelled: boolean; userStopped?: boolean };
+        onEvent({ type: 'text_delta', content: 'working' });
+        return new Promise<string>(() => { /* never settles */ });
+      }),
+      getState: vi.fn(() => ({
+        tokensUsedToday: 0,
+        status: 'working',
+        lastProgressAt: new Date(progressAt).toISOString(),
+      })),
+    });
+    const handler = new SSEHandler({ agentId: 'a', agent: agent as never, userText: 'go' });
+    const res = new MockResponse();
+    void handler.handle(res as unknown as ServerResponse);
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Client detaches.
+    res.emit('close');
+    expect(capturedToken).toBeDefined();
+    expect(capturedToken?.userStopped).toBeFalsy();
+
+    // 30 min of silence → within the 45-min window → still alive.
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(capturedToken?.userStopped).toBeFalsy();
+
+    // A fresh progress event resets the clock; another 30 min pass → 60 min total
+    // elapsed (well beyond the window) but never killed while progressing.
+    progressAt = Date.now();
+    await vi.advanceTimersByTimeAsync(30 * 60_000);
+    expect(capturedToken?.userStopped).toBeFalsy();
+
+    // Now go silent for the window → force-stop.
+    await vi.advanceTimersByTimeAsync(46 * 60_000);
+    expect(capturedToken?.userStopped).toBe(true);
+    expect(capturedToken?.cancelled).toBe(true);
+  });
 });

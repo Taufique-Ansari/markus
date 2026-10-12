@@ -67,6 +67,7 @@
       "llm": "配置大模型",
       "llmDesc": "设置 LLM 提供商的 API Key，这是智能体工作的基础",
       "llmDescHub": "使用 Markus Cloud AI，或添加你自己的模型 API Key —— 智能体工作所必需",
+      "llmDescConfigured": "当前默认模型提供商：{{provider}}。可随时在设置中更改。",
       "llmAction": "前往配置",
       "search": "配置搜索引擎",
       "searchDesc": "设置搜索 API Key，让智能体能够搜索互联网获取信息",

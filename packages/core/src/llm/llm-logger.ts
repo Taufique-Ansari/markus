@@ -1,7 +1,6 @@
-import { createLogger } from '@markus/shared';
+import { createLogger, markusPath } from '@markus/shared';
 import { mkdirSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 
 const log = createLogger('llm-logger');
 
@@ -27,7 +26,7 @@ export class LLMLogger {
   private enabled: boolean;
 
   constructor(logDir?: string) {
-    this.logDir = logDir ?? join(homedir(), '.markus', 'llm-logs');
+    this.logDir = logDir ?? markusPath('llm-logs');
     this.enabled = process.env.MARKUS_LLM_LOG !== 'false';
     if (this.enabled) {
       try {
