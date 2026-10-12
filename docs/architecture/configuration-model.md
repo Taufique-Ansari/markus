@@ -137,6 +137,20 @@ Common rules we adopt:
   strips any legacy plaintext `markus.apiKey` on disk.
 - Search / coding-tool keys: written to `~/.markus/.env`; legacy plaintext
   config fields are stripped on save.
+- **One implementation of the provider-key write**:
+  `packages/shared/src/utils/provider-secrets.ts` (`providerEnvKey` /
+  `persistProviderSecret`). Every CLI writer — `init` (env / manual / platform
+  import), `model` (interactive + non-interactive) and `auth add` — and the API
+  server's `persistProviderSecret` delegate to it. Detected-in-environment keys
+  are **used, never persisted** to markus.json — they land in `~/.markus/.env`
+  with an `apiKeyEnv` reference.
+- `deepMerge` now honours a source `null` as a delete **even under a brand-new
+  parent object** (previously `key: null` was copied verbatim on first write, so
+  a fresh provider kept a literal `"apiKey": null`). This is what makes
+  "drop plaintext on edit" actually remove the key from `markus.json`.
+- The seeded default **Secretary name is localized** to the owner/host locale
+  (`packages/shared/src/locale.ts` + `SECRETARY_DISPLAY_NAMES`); identification
+  stays locale-independent (the `secretary` role template is the stable key).
 - `org.name`: **DB is the single writer**; markus.json is a one-time seed.
 - Entry points: `loadEnvFile()` runs in both the CLI entry and `startBackend`
   (so the packaged desktop app reads `~/.markus/.env`, which it never did before).

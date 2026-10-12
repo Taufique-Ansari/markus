@@ -541,12 +541,13 @@ export async function createServices(config: ReturnType<typeof loadConfig>) {
     };
   }
 
-  // If the configured default provider has no API key, fall back to the first available one
-  if (!providerConfigs[defaultProvider]) {
-    const available = Object.keys(providerConfigs);
-    if (available.length > 0) {
-      defaultProvider = available[0];
-    }
+  // Do NOT let a merely env-detected provider hijack the default. The configured
+  // default is the user's intent (factory default = markus); when it has no
+  // usable config yet the router transparently falls back to any available
+  // provider at call time. We only auto-pick when nothing was configured at all,
+  // and prefer Markus Cloud over an arbitrary env provider.
+  if (!providerConfigs[defaultProvider] && !defaultProvider) {
+    defaultProvider = providerConfigs['markus'] ? 'markus' : Object.keys(providerConfigs)[0];
   }
 
   const llmRouter = LLMRouter.createDefault(providerConfigs, defaultProvider);

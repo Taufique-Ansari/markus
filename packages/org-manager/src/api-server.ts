@@ -4,7 +4,7 @@ import { readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync, rmSync
 import { gzipSync } from 'node:zlib';
 import { homedir } from 'node:os';
 import { execSync } from 'node:child_process';
-import { createLogger, generateId, userId as genUserId, resolveJwtSecret, resolveInitialAdminPassword, initialAdminPasswordFile, clearInitialAdminPassword, kebab, saveConfig, loadConfig, setEnvValue, unsetEnvValue, markusHome, getTextContent, stripInternalBlocks, extractThinkBlocks, APP_VERSION, checkForUpdate, buildManifest, manifestFilename, CHANNEL_CONTEXT_MESSAGES, SESSION_RESTORE_MAX_MESSAGES, PROVIDERS, getProviderBootstrapModel, pickOrgSecretary, type TaskStatus, type TaskPriority, type TaskSortField, type SortOrder, type PackageType, type RequirementStatus, type IntegrationConfig, type UserInputAnswer, type AgentActivity } from '@markus/shared';
+import { createLogger, generateId, userId as genUserId, resolveJwtSecret, resolveInitialAdminPassword, initialAdminPasswordFile, clearInitialAdminPassword, kebab, saveConfig, loadConfig, setEnvValue, unsetEnvValue, persistProviderSecret as storeProviderSecret, markusHome, getTextContent, stripInternalBlocks, extractThinkBlocks, APP_VERSION, checkForUpdate, buildManifest, manifestFilename, CHANNEL_CONTEXT_MESSAGES, SESSION_RESTORE_MAX_MESSAGES, PROVIDERS, getProviderBootstrapModel, pickOrgSecretary, type TaskStatus, type TaskPriority, type TaskSortField, type SortOrder, type PackageType, type RequirementStatus, type IntegrationConfig, type UserInputAnswer, type AgentActivity } from '@markus/shared';
 import {
   GatewayError,
   WorkflowEngine,
@@ -627,22 +627,16 @@ export class APIServer {
     }
   }
 
-  /** Legacy Worker-era keys look like `markus_<hex>`; OpenRouter keys start with `sk-or-`. */
-  /** Canonical env var name for a provider's API key (from PROVIDERS metadata). */
-  private providerEnvKey(providerName: string): string {
-    const meta = (PROVIDERS as Array<{ id: string; envKey?: string }>).find((p) => p.id === providerName);
-    return meta?.envKey ?? `${providerName.toUpperCase().replace(/-/g, '_')}_API_KEY`;
-  }
-
   /**
    * Persist a provider API key to the canonical secret store (`~/.markus/.env`)
    * and return the env var name it now lives under. Secrets are NEVER written to
    * markus.json — callers store `apiKeyEnv: <name>` and drop `apiKey`.
+   *
+   * Delegates to the shared single implementation so the API and the CLI write
+   * secrets through the exact same code path.
    */
   private persistProviderSecret(providerName: string, apiKey: string): string {
-    const envKey = this.providerEnvKey(providerName);
-    setEnvValue(envKey, apiKey);
-    return envKey;
+    return storeProviderSecret(providerName, apiKey);
   }
 
   /** Canonical env var holding the Markus Cloud (OpenRouter) member key. */
@@ -9288,7 +9282,9 @@ EXPLANATION_END`;
           if (name !== 'ollama' && apiKey) {
             next.apiKeyEnv = this.persistProviderSecret(name, apiKey); // secret → ~/.markus/.env
           }
-          delete next.apiKey; // never persist plaintext to markus.json
+          // `null` (not `delete`) so saveConfig's deepMerge actually removes any
+          // legacy plaintext key still on disk; an absent key is a no-op merge.
+          next.apiKey = null; // never persist plaintext to markus.json
           providers[name] = next as typeof prev;
           const configUpdates: Record<string, unknown> = { providers };
           if (!currentConfig.llm.routingDefaultModel && enabled !== false) {
@@ -9379,7 +9375,8 @@ EXPLANATION_END`;
             // Self-heal: migrate a legacy plaintext key to the secret store on any edit.
             next.apiKeyEnv = this.persistProviderSecret(providerName, legacyKey);
           }
-          delete next.apiKey; // never persist plaintext to markus.json
+          // `null` so deepMerge deletes a legacy plaintext key from the file.
+          next.apiKey = null; // never persist plaintext to markus.json
           providers[providerName] = next as typeof existing;
           saveConfig({ llm: { providers } } as any, this.markusConfigPath);
         } catch (e) {
@@ -9908,7 +9905,7 @@ EXPLANATION_END`;
             // and reference it by name — never plaintext in markus.json.
             next.apiKeyEnv = this.persistProviderSecret(pu.provider, apiKey);
           }
-          delete next.apiKey;
+          next.apiKey = null; // deepMerge drops a legacy plaintext key from the file
           updatedProviders[pu.provider] = next as typeof prev;
           applied.push(pu.provider);
         }
@@ -12425,6 +12422,7 @@ EXPLANATION_END`;
           description: body['description'] as string | undefined,
           priority: body['priority'] as TaskPriority | undefined,
           tags: body['tags'] as string[] | undefined,
+          projectId: body['projectId'] as string | null | undefined,
         });
         this.json(res, 200, { requirement });
       } catch (e) {

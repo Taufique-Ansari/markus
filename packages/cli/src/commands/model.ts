@@ -1,6 +1,6 @@
 import type { Command } from 'commander';
 import * as readline from 'node:readline';
-import { loadConfig, saveConfig, APP_VERSION, PROVIDERS } from '@markus/shared';
+import { loadConfig, saveConfig, APP_VERSION, PROVIDERS, persistProviderSecret } from '@markus/shared';
 import { listProviderModels } from '../lib/provider-models.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -261,7 +261,8 @@ async function configureNewProvider(ask: (q: string, def?: string) => Promise<st
   const config = loadConfig(undefined);
   const providers = { ...(config.llm?.providers ?? {}), [pdef.id]: {} };
   providers[pdef.id] = {
-    apiKey,
+    // Secret → canonical store; the config keeps only the env-var reference.
+    apiKeyEnv: persistProviderSecret(pdef.id, apiKey),
     apiKeyLabel: label,
     model: selectedModel,
     ...(baseUrl ? { baseUrl } : {}),
@@ -292,7 +293,8 @@ async function manageCredentialPool(
 
   const configured = Object.keys(currentProviders).filter(id => {
     const cfg = currentProviders[id];
-    return cfg?.apiKey && !isPlaceholder(cfg.apiKey);
+    const key = cfg?.apiKey ?? (cfg?.apiKeyEnv ? process.env[cfg.apiKeyEnv] : undefined);
+    return key && !isPlaceholder(key);
   });
 
   if (configured.length === 0) {
@@ -461,7 +463,7 @@ export function registerModelCommand(program: Command) {
           const config = loadConfig(undefined);
           const providers = { ...(config.llm?.providers ?? {}), [options.provider!]: {} };
           providers[options.provider!] = {
-            apiKey,
+            apiKeyEnv: persistProviderSecret(options.provider!, apiKey),
             model,
             ...(pdef.baseUrl ? { baseUrl: pdef.baseUrl } : {}),
             enabled: true,

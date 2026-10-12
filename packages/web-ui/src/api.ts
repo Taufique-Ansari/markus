@@ -277,7 +277,7 @@ export interface ProjectInfo {
   name: string;
   description?: string;
   status: string;
-  repositories?: Array<{ url: string; defaultBranch: string; localPath?: string }>;
+  repositories?: Array<{ url?: string; localPath?: string; defaultBranch: string; role?: 'primary' | 'secondary' }>;
   teamIds: string[];
   /** Human user id who created the project, when known */
   createdBy?: string;
@@ -1676,7 +1676,7 @@ export const api = {
       return request<{ tasks: TaskInfo[]; total: number; page: number; pageSize: number; totalPages: number }>(`/tasks${qs ? `?${qs}` : ''}`);
     },
     get: (id: string) => request<{ task: TaskInfo }>(`/tasks/${id}`),
-    create: (title: string, description: string, assignedAgentId: string, reviewerId: string, priority?: string, projectId?: string, blockedBy?: string[], requirementId?: string, taskType?: string, scheduleConfig?: { every?: string; cron?: string }, reviewerType?: 'agent' | 'human') =>
+    create: (title: string, description: string, assignedAgentId: string, reviewerId: string, priority?: string, projectId?: string, blockedBy?: string[], requirementId?: string, taskType?: string, scheduleConfig?: { every?: string; cron?: string; maxRuns?: number; timezone?: string }, reviewerType?: 'agent' | 'human') =>
       request<{ task: TaskInfo }>('/tasks', { method: 'POST', body: JSON.stringify({ title, description, assignedAgentId, reviewerId, priority, projectId, blockedBy, requirementId, taskType, scheduleConfig, reviewerType }) }),
     update: (id: string, data: { title?: string; description?: string; priority?: string; projectId?: string | null; requirementId?: string | null; blockedBy?: string[]; reviewerId?: string; reviewerType?: 'agent' | 'human' }) =>
       request(`/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
@@ -1773,7 +1773,7 @@ export const api = {
     get: (id: string) => request<{ requirement: RequirementInfo }>(`/requirements/${id}`),
     create: (data: { title: string; description: string; priority?: string; projectId?: string; tags?: string[] }) =>
       request<{ requirement: RequirementInfo }>('/requirements', { method: 'POST', body: JSON.stringify(data) }),
-    update: (id: string, data: { title?: string; description?: string; priority?: string; tags?: string[] }) =>
+    update: (id: string, data: { title?: string; description?: string; priority?: string; tags?: string[]; projectId?: string | null }) =>
       request<{ requirement: RequirementInfo }>(`/requirements/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     updateStatus: (id: string, status: string) =>
       request<{ requirement: RequirementInfo }>(`/requirements/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
@@ -1850,7 +1850,7 @@ export const api = {
       request<{ ownership: Array<{ terminalId: string; agentId: string; agentName: string }> }>('/terminal/session-ownership'),
   },
   settings: {
-    getLlm: () => request<{ defaultProvider: string; providers: Record<string, { model: string; configured: boolean }> }>('/settings/llm'),
+    getLlm: () => request<{ defaultProvider: string; providers: Record<string, { model: string; configured: boolean; displayName?: string }> }>('/settings/llm'),
     /** Local preferred org name (markus.json). Applied to Hub org on connect. */
     getOrg: () => request<{ org: { id: string; name: string } }>('/settings/org'),
     updateOrg: (name: string) =>

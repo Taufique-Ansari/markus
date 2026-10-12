@@ -205,7 +205,10 @@ export interface MarkusConfig {
 const DEFAULT_CONFIG: MarkusConfig = {
   org: { id: 'default', name: 'My Organization' },
   llm: {
-    defaultProvider: 'anthropic',
+    // Factory default is Markus Cloud AI. A detected *environment* key
+    // (OPENAI_API_KEY, …) only makes a provider usable — it must never
+    // silently become the default; the user chooses a default explicitly.
+    defaultProvider: 'markus',
     defaultModel: 'claude-opus-5',
     providers: {},
   },
@@ -318,7 +321,10 @@ function deepMerge(target: Obj, source: Obj): Obj {
       if (tv && typeof tv === 'object' && !Array.isArray(tv)) {
         result[key] = deepMerge(tv as Obj, sv as Obj);
       } else {
-        result[key] = sv;
+        // No existing object to merge into: still recurse with an empty target
+        // so nested `null`s in the source are honoured as deletions (the
+        // documented contract). Copying `sv` verbatim would leak `key: null`.
+        result[key] = deepMerge({}, sv as Obj);
       }
     } else {
       result[key] = sv;

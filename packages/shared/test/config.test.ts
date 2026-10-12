@@ -26,7 +26,9 @@ describe('deepMerge (via loadConfig/saveConfig)', () => {
   it('loadConfig returns defaults when file missing', () => {
     const cfg = loadConfig(join(tmpDir, 'missing.json'));
     expect(cfg.org.id).toBe('default');
-    expect(cfg.llm.defaultProvider).toBe('anthropic');
+    // Factory default is Markus Cloud AI (an env-detected key must never
+    // silently become the default — see commands-start-services.test.ts).
+    expect(cfg.llm.defaultProvider).toBe('markus');
     expect(cfg.server.apiPort).toBe(8056);
   });
 
@@ -36,7 +38,7 @@ describe('deepMerge (via loadConfig/saveConfig)', () => {
     const cfg = loadConfig(cfgPath);
     expect(cfg.org.name).toBe('Test Org');
     expect(cfg.org.id).toBe('default');
-    expect(cfg.llm.defaultProvider).toBe('anthropic');
+    expect(cfg.llm.defaultProvider).toBe('markus');
   });
 
   it('saveConfig creates file if missing', () => {
@@ -80,6 +82,18 @@ describe('deepMerge (via loadConfig/saveConfig)', () => {
     saveConfig({ org: { id: 'new', name: 'New' } }, cfgPath);
     const cfg = loadConfig(cfgPath);
     expect(cfg.org.id).toBe('new');
+  });
+
+  it('null deletes a key even when the parent object is brand new', () => {
+    const cfgPath = join(tmpDir, 'markus.json');
+    // Fresh file: the provider key did not exist before this save.
+    saveConfig({
+      llm: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY', apiKey: null, enabled: true } } },
+    } as any, cfgPath);
+    const raw = JSON.parse(require('node:fs').readFileSync(cfgPath, 'utf-8'));
+    expect(raw.llm.providers.openai.apiKey).toBeUndefined();
+    expect(raw.llm.providers.openai.apiKeyEnv).toBe('OPENAI_API_KEY');
+    expect(raw.llm.providers.openai.enabled).toBe(true);
   });
 
   it('nested null deletes deeply nested keys', () => {

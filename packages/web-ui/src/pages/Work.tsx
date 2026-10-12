@@ -2,6 +2,13 @@ import { useState, useEffect, useCallback, useMemo, useRef, type DragEvent, type
 import { useTranslation } from 'react-i18next';
 import { api, wsClient, ApiError, invalidateApiCache, type ProjectInfo, type TaskInfo, type AgentInfo, type TaskLogEntry, type TaskComment, type RequirementComment, type RequirementInfo, type HumanUserInfo, type RoundSummary, type AuthUser, type ActivityRecord, type StatusTransitionInfo, type WorkflowInfo, type WorkflowRunInfo, type WorkflowTemplateInfo } from '../api.ts';
 import { ConfirmModal } from '../components/ConfirmModal.tsx';
+import { TaskScheduleFields } from '../components/TaskScheduleFields.tsx';
+import {
+  type ScheduleDraft,
+  defaultScheduleDraft,
+  draftToScheduleConfig,
+  draftFromScheduleConfig,
+} from '../lib/taskSchedule.ts';
 import { ThinkingDots, StreamingText, filterCompletedStarts, streamEntryToExecEntry, FullExecutionLog, CompactExecutionCard, type ExecEntry, type ExecutionStreamEntryUI } from '../components/ExecutionTimeline.tsx';
 import { ProcessTimeline } from './ChatComponents.tsx';
 import { taskLogToStreamEntry, activityLogToStreamEntry, type AgentActivityLogEntry } from '../api.ts';
@@ -23,6 +30,7 @@ import { useSwipeTabs } from '../hooks/useSwipeTabs.ts';
 import { MobileMenuButton } from '../components/MobileMenuButton.tsx';
 import { useLayout } from '../contexts/LayoutContext.tsx';
 import { isEditableTarget } from '../lib/keyboard-shortcuts.ts';
+import { ROW_GRID_CLS, ROW_GRID_2COL_CLS, ROW_LABEL_CLS, ROW_INPUT_CLS, ROW_ADD_BTN_CLS } from '../lib/dialogStyles.ts';
 
 const WORK_L1_COLLAPSED_KEY = 'markus_work_l1_collapsed';
 const BOARD_TYPE_ORDER = ['backlog', 'kanban', 'dag', 'workflows'] as const;
@@ -192,6 +200,42 @@ function SearchableSelect({ options, value, onChange, placeholder, noMatchesText
     </div>
   );
 }
+
+/* ── PriorityChips: priority as a spread-out, one-tap row (replaces the dropdown) ── */
+const PRIORITY_META: { value: string; labelKey: string; dot: string; active: string }[] = [
+  { value: 'low', labelKey: 'work:priority.low', dot: 'bg-slate-400', active: 'bg-slate-500/15 text-slate-500 border-slate-500/40' },
+  { value: 'medium', labelKey: 'work:priority.medium', dot: 'bg-blue-500', active: 'bg-blue-500/15 text-blue-500 border-blue-500/40' },
+  { value: 'high', labelKey: 'work:priority.high', dot: 'bg-amber-500', active: 'bg-amber-500/15 text-amber-600 border-amber-500/40' },
+  { value: 'urgent', labelKey: 'work:priority.urgent', dot: 'bg-red-500', active: 'bg-red-500/15 text-red-500 border-red-500/40' },
+];
+
+function PriorityChips({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const { t } = useTranslation('work');
+  return (
+    <div className="flex flex-wrap gap-2">
+      {PRIORITY_META.map(p => {
+        const active = value === p.value;
+        return (
+          <button
+            key={p.value}
+            type="button"
+            onClick={() => onChange(p.value)}
+            aria-pressed={active}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border transition-all ${
+              active ? `${p.active} font-medium` : 'border-border-default text-fg-secondary hover:bg-surface-elevated'
+            }`}
+          >
+            <span className={`w-2 h-2 rounded-full ${p.dot}`} />
+            {t(p.labelKey)}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Row class strings for the create dialogs now live in lib/dialogStyles.ts so
+// the task / requirement / project dialogs share one source and never drift.
 
 /* ── Send to chat: 把「需求 / 任务」作为上下文标签发到某个智能体或成员的对话 ── */
 
@@ -2105,10 +2149,7 @@ function TaskDetailPanel({
   const [rejectConfirm, setRejectConfirm] = useState(false);
   const [archiveConfirm, setArchiveConfirm] = useState(false);
   const [editingSchedule, setEditingSchedule] = useState(false);
-  const [scheduleMode, setScheduleMode] = useState<'every' | 'cron'>('every');
-  const [scheduleEveryDraft, setScheduleEveryDraft] = useState('');
-  const [scheduleCronDraft, setScheduleCronDraft] = useState('');
-  const [scheduleMaxRunsDraft, setScheduleMaxRunsDraft] = useState('');
+  const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft | null>(null);
   const [actionInFlight, setActionInFlight] = useState(false);
   const [sendToChatOpen, setSendToChatOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'details' | 'logs' | 'deliverables' | 'history'>('details');
@@ -2548,76 +2589,65 @@ function TaskDetailPanel({
                 )}
               </div>
 
-              {/* Editable fields */}
-              <div className="px-6 py-4 border-b border-border-default/60 space-y-3">
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-[10px] font-semibold text-fg-tertiary uppercase tracking-wider mb-1">{t('work:task.projectLabel')}</label>
-                    <SearchableSelect
-                      size="sm"
-                      disabled={actionInFlight}
-                      options={[{ value: '', label: t('work:task.noProject') }, ...projects.map(p => ({ value: p.id, label: p.name }))]}
-                      value={task.projectId ?? ''}
-                      onChange={v => void updateProject(v)}
-                      placeholder={t('work:task.noProject')}
-                      noMatchesText={t('work:task.noMatches')}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-semibold text-fg-tertiary uppercase tracking-wider mb-1">{t('work:task.requirementLabel')}</label>
-                    <SearchableSelect
-                      size="sm"
-                      disabled={actionInFlight}
-                      options={[{ value: '', label: t('work:task.noRequirement') }, ...requirements.filter(r => !task.projectId || r.projectId === task.projectId).map(r => ({ value: r.id, label: r.title }))]}
-                      value={task.requirementId ?? ''}
-                      onChange={v => doUpdate(() => api.tasks.update(task.id, { requirementId: v || null }))}
-                      placeholder={t('work:task.noRequirement')}
-                      noMatchesText={t('work:task.noMatches')}
-                    />
-                  </div>
-                </div>
-                <div className="grid grid-cols-3 gap-4">
-                  <div>
-                    <label className="block text-[10px] font-semibold text-fg-tertiary uppercase tracking-wider mb-1">{t('work:task.assignee')}</label>
-                    <SearchableSelect
-                      size="sm"
-                      disabled={actionInFlight}
-                      options={[{ value: '', label: t('work:task.unassigned') }, ...agents.map(a => ({ value: a.id, label: `${a.name} (${a.status})` }))]}
-                      value={task.assignedAgentId ?? ''}
-                      onChange={v => void assignAgent(v)}
-                      placeholder={t('work:task.unassigned')}
-                      noMatchesText={t('work:task.noMatches')}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-semibold text-fg-tertiary uppercase tracking-wider mb-1">{t('work:task.reviewer')}</label>
-                    <SearchableSelect
-                      size="sm"
-                      disabled={actionInFlight}
-                      options={[
-                        ...users.map(u => ({ value: `human:${u.id}`, label: u.name })),
-                        ...agents.map(a => ({ value: `agent:${a.id}`, label: `${a.name} (${a.status})` })),
-                      ]}
-                      value={`${task.reviewerType ?? 'agent'}:${task.reviewerId ?? ''}`}
-                      onChange={val => {
-                        if (!val) return;
-                        const isHuman = val.startsWith('human:');
-                        const id = val.replace(/^(human|agent):/, '');
-                        if (id !== task.reviewerId || (isHuman ? 'human' : 'agent') !== (task.reviewerType ?? 'agent')) {
-                          void doUpdate(() => api.tasks.update(task.id, { reviewerId: id, reviewerType: isHuman ? 'human' : 'agent' }));
-                        }
-                      }}
-                      placeholder={t('work:task.selectReviewer')}
-                      noMatchesText={t('work:task.noMatches')}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-semibold text-fg-tertiary uppercase tracking-wider mb-1">{t('work:task.priority')}</label>
-                    <select value={task.priority} onChange={e => void updatePriority(e.target.value)} disabled={actionInFlight}
-                      className="w-full px-2 py-1.5 bg-surface-elevated border border-border-default rounded-lg text-xs text-fg-primary focus:border-brand-500 outline-none disabled:opacity-50 cursor-pointer">
-                      <option value="low">{t('work:priority.low')}</option><option value="medium">{t('work:priority.medium')}</option><option value="high">{t('work:priority.high')}</option><option value="urgent">{t('work:priority.urgent')}</option>
-                    </select>
-                  </div>
+              {/* Editable fields — two label/control pairs per row on wide panels */}
+              <div className="px-6 py-4 border-b border-border-default/60">
+                <div className={ROW_GRID_2COL_CLS}>
+                  <label className={ROW_LABEL_CLS}>{t('work:task.projectLabel')}</label>
+                  <SearchableSelect
+                    size="sm"
+                    disabled={actionInFlight}
+                    options={[{ value: '', label: t('work:task.noProject') }, ...projects.map(p => ({ value: p.id, label: p.name }))]}
+                    value={task.projectId ?? ''}
+                    onChange={v => void updateProject(v)}
+                    placeholder={t('work:task.noProject')}
+                    noMatchesText={t('work:task.noMatches')}
+                  />
+
+                  <label className={ROW_LABEL_CLS}>{t('work:task.requirementLabel')}</label>
+                  <SearchableSelect
+                    size="sm"
+                    disabled={actionInFlight}
+                    options={[{ value: '', label: t('work:task.noRequirement') }, ...requirements.filter(r => !task.projectId || r.projectId === task.projectId).map(r => ({ value: r.id, label: r.title }))]}
+                    value={task.requirementId ?? ''}
+                    onChange={v => doUpdate(() => api.tasks.update(task.id, { requirementId: v || null }))}
+                    placeholder={t('work:task.noRequirement')}
+                    noMatchesText={t('work:task.noMatches')}
+                  />
+
+                  <label className={ROW_LABEL_CLS}>{t('work:task.assignee')}</label>
+                  <SearchableSelect
+                    size="sm"
+                    disabled={actionInFlight}
+                    options={[{ value: '', label: t('work:task.unassigned') }, ...agents.map(a => ({ value: a.id, label: `${a.name} (${a.status})` }))]}
+                    value={task.assignedAgentId ?? ''}
+                    onChange={v => void assignAgent(v)}
+                    placeholder={t('work:task.unassigned')}
+                    noMatchesText={t('work:task.noMatches')}
+                  />
+
+                  <label className={ROW_LABEL_CLS}>{t('work:task.reviewer')}</label>
+                  <SearchableSelect
+                    size="sm"
+                    disabled={actionInFlight}
+                    options={[
+                      ...users.map(u => ({ value: `human:${u.id}`, label: u.name })),
+                      ...agents.map(a => ({ value: `agent:${a.id}`, label: `${a.name} (${a.status})` })),
+                    ]}
+                    value={`${task.reviewerType ?? 'agent'}:${task.reviewerId ?? ''}`}
+                    onChange={val => {
+                      if (!val) return;
+                      const isHuman = val.startsWith('human:');
+                      const id = val.replace(/^(human|agent):/, '');
+                      if (id !== task.reviewerId || (isHuman ? 'human' : 'agent') !== (task.reviewerType ?? 'agent')) {
+                        void doUpdate(() => api.tasks.update(task.id, { reviewerId: id, reviewerType: isHuman ? 'human' : 'agent' }));
+                      }
+                    }}
+                    placeholder={t('work:task.selectReviewer')}
+                    noMatchesText={t('work:task.noMatches')}
+                  />
+
+                  <label className={ROW_LABEL_CLS}>{t('work:task.priority')}</label>
+                  <PriorityChips value={task.priority} onChange={v => void updatePriority(v)} />
                 </div>
               </div>
 
@@ -2855,10 +2885,7 @@ function TaskDetailPanel({
           <div className={`mx-6 mt-3 mb-0 px-4 py-2.5 rounded-lg border text-xs ${schedPaused ? 'bg-amber-500/5 border-amber-500/20' : 'bg-brand-500/5 border-brand-500/20'} ${!isRunning && !editingSchedule && !task.scheduleConfig.runAt ? 'cursor-pointer hover:border-brand-500/40 transition-colors' : ''}`}
             onClick={() => {
               if (isRunning || editingSchedule || task.scheduleConfig?.runAt) return;
-              setScheduleMode(task.scheduleConfig?.cron ? 'cron' : 'every');
-              setScheduleEveryDraft(task.scheduleConfig?.every ?? '4h');
-              setScheduleCronDraft(task.scheduleConfig?.cron ?? '');
-              setScheduleMaxRunsDraft(task.scheduleConfig?.maxRuns && task.scheduleConfig.maxRuns > 0 ? String(task.scheduleConfig.maxRuns) : '');
+              setScheduleDraft(draftFromScheduleConfig(task.scheduleConfig));
               setEditingSchedule(true);
             }}>
             <div className="flex items-center gap-2 flex-wrap">
@@ -2886,43 +2913,12 @@ function TaskDetailPanel({
                 <svg className="w-3 h-3 text-brand-500 ml-auto shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
               )}
             </div>
-            {editingSchedule ? (
+            {editingSchedule && scheduleDraft ? (
               <div className="mt-2 pt-2 border-t border-border-default/50 space-y-2" onClick={e => e.stopPropagation()}>
-                <div className="flex items-center gap-2">
-                  <select value={scheduleMode} onChange={e => setScheduleMode(e.target.value as 'every' | 'cron')}
-                    className="px-2 py-1 text-xs bg-surface-elevated border border-border-default rounded-lg">
-                    <option value="every">{t('work:task.scheduleEveryMode')}</option>
-                    <option value="cron">{t('work:task.scheduleCronMode')}</option>
-                  </select>
-                  {scheduleMode === 'every' ? (
-                    <select value={scheduleEveryDraft} onChange={e => setScheduleEveryDraft(e.target.value)}
-                      className="flex-1 px-2 py-1 text-xs bg-surface-elevated border border-border-default rounded-lg">
-                      <option value="30m">{t('work:task.freq30m')}</option>
-                      <option value="1h">{t('work:task.freq1h')}</option>
-                      <option value="2h">{t('work:task.freq2h')}</option>
-                      <option value="4h">{t('work:task.freq4h')}</option>
-                      <option value="8h">{t('work:task.freq8h')}</option>
-                      <option value="12h">{t('work:task.freq12h')}</option>
-                      <option value="1d">{t('work:task.freq1d')}</option>
-                      <option value="1w">{t('work:task.freq1w')}</option>
-                    </select>
-                  ) : (
-                    <input value={scheduleCronDraft} onChange={e => setScheduleCronDraft(e.target.value)}
-                      placeholder="0 9 * * 1-5" className="flex-1 px-2 py-1 text-xs bg-surface-elevated border border-border-default rounded-lg outline-none focus:border-brand-500" />
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  <label className="text-fg-tertiary shrink-0">{t('work:task.scheduleMaxRuns')}</label>
-                  <input value={scheduleMaxRunsDraft} onChange={e => setScheduleMaxRunsDraft(e.target.value.replace(/\D/g, ''))}
-                    placeholder={t('work:task.scheduleMaxRunsPlaceholder')} className="w-20 px-2 py-1 text-xs bg-surface-elevated border border-border-default rounded-lg outline-none focus:border-brand-500" />
-                </div>
+                <TaskScheduleFields value={scheduleDraft} onChange={setScheduleDraft} compact />
                 <div className="flex items-center gap-2 pt-1">
                   <button onClick={async () => {
-                    const config: { every?: string; cron?: string; maxRuns?: number } = {};
-                    if (scheduleMode === 'every') config.every = scheduleEveryDraft;
-                    else config.cron = scheduleCronDraft.trim();
-                    if (scheduleMaxRunsDraft) config.maxRuns = parseInt(scheduleMaxRunsDraft, 10);
-                    await doUpdate(() => api.tasks.updateSchedule(task.id, config));
+                    await doUpdate(() => api.tasks.updateSchedule(task.id, draftToScheduleConfig(scheduleDraft)));
                     setEditingSchedule(false);
                   }} disabled={actionInFlight} className="px-3 py-1 text-xs bg-brand-600 hover:bg-brand-500 rounded-lg text-white disabled:opacity-50">{t('common:save')}</button>
                   <button onClick={() => setEditingSchedule(false)} className="px-3 py-1 text-xs text-fg-secondary hover:text-fg-primary">{t('common:cancel')}</button>
@@ -4970,9 +4966,13 @@ export function WorkPage({ authUser, previewMode, previewData }: { authUser?: Au
   const [taskRequirementId, setTaskRequirementId] = useState<string>('');
   const [taskBlockedBy, setTaskBlockedBy] = useState<string[]>([]);
   const [taskType, setTaskType] = useState<'standard' | 'scheduled'>('standard');
-  const [taskScheduleEvery, setTaskScheduleEvery] = useState('4h');
+  const [taskScheduleDraft, setTaskScheduleDraft] = useState<ScheduleDraft>(() => defaultScheduleDraft());
   const [taskCreateError, setTaskCreateError] = useState('');
   const [taskCreating, setTaskCreating] = useState(false);
+  // Inline quick-create so the flow is never interrupted by a missing project/requirement.
+  const [inlineProjectFor, setInlineProjectFor] = useState<null | 'task' | 'req'>(null);
+  const [showInlineReq, setShowInlineReq] = useState(false);
+  const [inlineReqTitle, setInlineReqTitle] = useState('');
 
   const [selectedTask, setSelectedTask] = useState<TaskInfo | null>(null);
   const [selectedReq, setSelectedReq] = useState<RequirementInfo | null>(() => {
@@ -5024,7 +5024,9 @@ export function WorkPage({ authUser, previewMode, previewData }: { authUser?: Au
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      if (rejectReqId) { setRejectReqId(null); setRejectReqError(''); }
+      if (inlineProjectFor) { setInlineProjectFor(null); }
+      else if (showInlineReq) { setShowInlineReq(false); setInlineReqTitle(''); }
+      else if (rejectReqId) { setRejectReqId(null); setRejectReqError(''); }
       else if (showCreateTask) { setShowCreateTask(false); setTaskCreateError(''); }
       else if (showCreateReq) { setShowCreateReq(false); setReqTitle(''); setReqDesc(''); setReqCreateError(''); }
       else if (showFilterSheet) setShowFilterSheet(false);
@@ -5037,7 +5039,7 @@ export function WorkPage({ authUser, previewMode, previewData }: { authUser?: Au
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [rejectReqId, showCreateTask, showCreateReq, showFilterSheet, rightDetailMode, isMobile]);
+  }, [inlineProjectFor, showInlineReq, rejectReqId, showCreateTask, showCreateReq, showFilterSheet, rightDetailMode, isMobile]);
 
   const selectedProject = projects.find(p => p.id === selectedProjectId) ?? null;
   const selectedProjectTeamId = selectedProject?.teamIds?.[0] ?? null;
@@ -5583,10 +5585,10 @@ export function WorkPage({ authUser, previewMode, previewData }: { authUser?: Au
         taskBlockedBy.length > 0 ? taskBlockedBy : undefined,
         reqId,
         taskType !== 'standard' ? taskType : undefined,
-        taskType === 'scheduled' ? { every: taskScheduleEvery } : undefined,
+        taskType === 'scheduled' ? draftToScheduleConfig(taskScheduleDraft) : undefined,
         reviewerIsHuman ? 'human' : 'agent',
       );
-      setTaskTitle(''); setTaskDesc(''); setTaskBlockedBy([]); setTaskRequirementId(''); setTaskType('standard'); setTaskScheduleEvery('4h'); setShowCreateTask(false);
+      setTaskTitle(''); setTaskDesc(''); setTaskBlockedBy([]); setTaskRequirementId(''); setTaskType('standard'); setTaskScheduleDraft(defaultScheduleDraft()); setShowCreateTask(false);
       refreshBoard();
       if (task) forceOpenTask(task);
     } catch (e) {
@@ -5596,6 +5598,22 @@ export function WorkPage({ authUser, previewMode, previewData }: { authUser?: Au
       setTaskCreateError(localized || t('work:task.errorCreatingTask', { message: e instanceof Error ? e.message : String(e) }));
     } finally {
       setTaskCreating(false);
+    }
+  };
+
+  // Quick-create a requirement from within the task dialog and link it to this task.
+  const createInlineReq = async () => {
+    if (!inlineReqTitle.trim() || !taskProjectId) return;
+    try {
+      const { requirement } = await api.requirements.create({
+        title: inlineReqTitle.trim(), description: inlineReqTitle.trim(), priority: 'medium', projectId: taskProjectId,
+      });
+      setInlineReqTitle(''); setShowInlineReq(false);
+      msg(t('work:task.requirementCreated'));
+      refreshRequirements();
+      if (requirement) setTaskRequirementId(requirement.id);
+    } catch (e) {
+      setTaskCreateError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -6334,6 +6352,7 @@ export function WorkPage({ authUser, previewMode, previewData }: { authUser?: Au
 
           {/* Actions */}
           <div data-no-drag className="flex items-center gap-1.5 shrink-0">
+            <button onClick={() => setShowCreateProject(true)} className="px-3 py-1.5 border border-border-default text-fg-secondary hover:bg-surface-elevated text-xs rounded-lg font-medium transition-colors">{t('work:task.newProjectBtn')}</button>
             <button onClick={openCreateReq} className="px-3 py-1.5 bg-brand-600 hover:bg-brand-500 text-white text-xs rounded-lg font-medium transition-colors">{t('work:task.newRequirement')}</button>
             <button onClick={() => { setTaskProjectId(selectedProjectId ?? ''); setShowCreateTask(true); }} className="px-3 py-1.5 border border-amber-500/60 text-amber-600 hover:bg-amber-500/10 text-xs rounded-lg font-medium transition-colors">{t('work:task.newTaskBtn')}</button>
           </div>
@@ -6830,131 +6849,134 @@ export function WorkPage({ authUser, previewMode, previewData }: { authUser?: Au
         />
       )}
 
+      {/* Nested quick-create: create a project without leaving the task/requirement dialog */}
+      {inlineProjectFor && (
+        <NewProjectModal
+          orgId={authUser?.orgId}
+          onCreated={p => {
+            setProjects(prev => (prev.some(x => x.id === p.id) ? prev : [...prev, p]));
+            if (inlineProjectFor === 'task') { setTaskProjectId(p.id); setTaskRequirementId(''); }
+            else setReqProjectId(p.id);
+            setInlineProjectFor(null);
+            msg(t('work:task.projectCreated'));
+          }}
+          onClose={() => setInlineProjectFor(null)}
+        />
+      )}
+
       {/* ── Create Task Modal ── */}
       {showCreateTask && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3" onClick={() => { setShowCreateTask(false); setTaskCreateError(''); }}>
           <div className={`bg-surface-secondary border border-border-default rounded-xl p-6 space-y-4 max-h-[90dvh] overflow-y-auto ${isMobile ? 'w-full' : 'w-[28rem]'}`} onClick={e => e.stopPropagation()}>
             <h3 className="text-base font-semibold text-fg-primary">{t('work:task.newTask')}</h3>
-            <div>
-              <label className="block text-sm text-fg-secondary mb-1.5">{t('work:task.titleLabel')}</label>
+            <div className={ROW_GRID_CLS}>
+              <label className={ROW_LABEL_CLS}>{t('work:task.taskType')}</label>
+              <div className="inline-flex w-full p-0.5 bg-surface-elevated border border-border-default rounded-lg">
+                {(['standard', 'scheduled'] as const).map(v => (
+                  <button key={v} type="button" onClick={() => setTaskType(v)} aria-pressed={taskType === v}
+                    className={`flex-1 px-3 py-1.5 text-sm rounded-md transition-colors ${taskType === v ? 'bg-brand-600 text-white font-medium' : 'text-fg-secondary hover:text-fg-primary'}`}>
+                    {v === 'standard' ? t('work:task.taskTypeStandard') : t('work:task.taskTypeScheduled')}
+                  </button>
+                ))}
+              </div>
+              <label className={ROW_LABEL_CLS}>{t('work:task.titleLabel')}</label>
               <input autoFocus={!isMobile} value={taskTitle} onChange={e => setTaskTitle(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') void createTask(); }}
-                className="w-full px-3 py-2 bg-surface-elevated border border-border-default rounded-lg text-sm focus:border-brand-500 outline-none" />
-            </div>
-            <div>
-              <label className="block text-sm text-fg-secondary mb-1.5">{t('work:task.descriptionField')}</label>
+                className={ROW_INPUT_CLS} />
+              <label className={ROW_LABEL_CLS}>{t('work:task.descriptionField')}</label>
               <textarea value={taskDesc} onChange={e => setTaskDesc(e.target.value)} rows={2}
-                className="w-full px-3 py-2 bg-surface-elevated border border-border-default rounded-lg text-sm focus:border-brand-500 outline-none resize-none" />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm text-fg-secondary mb-1.5">{t('work:task.projectLabel')}</label>
-                <SearchableSelect
+                className={`${ROW_INPUT_CLS} resize-none`} />
+              <label className={ROW_LABEL_CLS}>{t('work:task.priorityField')}</label>
+              <PriorityChips value={taskPriority} onChange={setTaskPriority} />
+              <label className={ROW_LABEL_CLS}>{t('work:task.projectLabel')}</label>
+              <div className="flex items-center gap-2 min-w-0">
+                <SearchableSelect className="flex-1"
                   options={[{ value: '', label: t('work:task.noProject') }, ...projects.map(p => ({ value: p.id, label: p.name }))]}
                   value={taskProjectId}
                   onChange={v => { setTaskProjectId(v); setTaskRequirementId(''); }}
                   placeholder={t('work:task.noProject')}
                   noMatchesText={t('work:task.noMatches')}
                 />
+                <button type="button" onClick={() => setInlineProjectFor('task')} className={ROW_ADD_BTN_CLS}>{t('work:task.newProjectInline')}</button>
               </div>
-              <div>
-                <label className="block text-sm text-fg-secondary mb-1.5">{t('work:task.requirementLabel')}</label>
-                <SearchableSelect
-                  options={[
-                    { value: '', label: t('work:task.selectRequirement') },
-                    ...allRequirements
-                      .filter(r => r.status === 'in_progress' && (!taskProjectId || r.projectId === taskProjectId))
-                      .map(r => ({ value: r.id, label: r.title })),
-                  ]}
-                  value={taskRequirementId}
-                  onChange={setTaskRequirementId}
-                  placeholder={t('work:task.selectRequirement')}
-                  noMatchesText={t('work:task.noMatches')}
-                />
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm text-fg-secondary mb-1.5">{t('work:task.assignToRequired')} <span className="text-red-500">*</span></label>
-                <SearchableSelect
-                  options={agents.map(a => ({ value: a.id, label: `${a.name} (${a.status})` }))}
-                  value={taskAssignTo}
-                  onChange={setTaskAssignTo}
-                  placeholder={t('work:task.selectAgent')}
-                  noMatchesText={t('work:task.noMatches')}
-                />
-              </div>
-              <div>
-                <label className="block text-sm text-fg-secondary mb-1.5">{t('work:task.reviewerRequired')} <span className="text-red-500">*</span></label>
-                <SearchableSelect
-                  options={[
-                    ...users.map(u => ({ value: `human:${u.id}`, label: u.name })),
-                    ...agents.filter(a => a.id !== taskAssignTo).map(a => ({ value: `agent:${a.id}`, label: `${a.name} (${a.status})` })),
-                  ]}
-                  value={taskReviewer}
-                  onChange={setTaskReviewer}
-                  placeholder={t('work:task.selectReviewer')}
-                  noMatchesText={t('work:task.noMatches')}
-                />
-              </div>
-            </div>
-            <div className={`grid gap-4 ${taskType === 'scheduled' ? 'grid-cols-3' : 'grid-cols-2'}`}>
-              <div>
-                <label className="block text-sm text-fg-secondary mb-1.5">{t('work:task.priorityField')}</label>
-                <select value={taskPriority} onChange={e => setTaskPriority(e.target.value)}
-                  className="w-full px-3 py-2 bg-surface-elevated border border-border-default rounded-lg text-sm focus:border-brand-500 outline-none">
-                  <option value="low">{t('work:priority.low')}</option><option value="medium">{t('work:priority.medium')}</option><option value="high">{t('work:priority.high')}</option><option value="urgent">{t('work:priority.urgent')}</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm text-fg-secondary mb-1.5">{t('work:task.taskType')}</label>
-                <select value={taskType} onChange={e => setTaskType(e.target.value as 'standard' | 'scheduled')}
-                  className="w-full px-3 py-2 bg-surface-elevated border border-border-default rounded-lg text-sm focus:border-brand-500 outline-none">
-                  <option value="standard">{t('work:task.taskTypeStandard')}</option>
-                  <option value="scheduled">{t('work:task.taskTypeScheduled')}</option>
-                </select>
-              </div>
-              {taskType === 'scheduled' && (
-                <div>
-                  <label className="block text-sm text-fg-secondary mb-1.5">{t('work:task.frequency')}</label>
-                  <select value={taskScheduleEvery} onChange={e => setTaskScheduleEvery(e.target.value)}
-                    className="w-full px-3 py-2 bg-surface-elevated border border-border-default rounded-lg text-sm focus:border-brand-500 outline-none">
-                    <option value="30m">{t('work:task.freq30m')}</option>
-                    <option value="1h">{t('work:task.freq1h')}</option>
-                    <option value="2h">{t('work:task.freq2h')}</option>
-                    <option value="4h">{t('work:task.freq4h')}</option>
-                    <option value="8h">{t('work:task.freq8h')}</option>
-                    <option value="12h">{t('work:task.freq12h')}</option>
-                    <option value="1d">{t('work:task.freq1d')}</option>
-                    <option value="1w">{t('work:task.freq1w')}</option>
-                  </select>
+              <label className={ROW_LABEL_CLS}>{t('work:task.requirementLabel')}</label>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <SearchableSelect className="flex-1"
+                    options={[
+                      { value: '', label: t('work:task.selectRequirement') },
+                      ...allRequirements
+                        .filter(r => r.status === 'in_progress' && (!taskProjectId || r.projectId === taskProjectId))
+                        .map(r => ({ value: r.id, label: r.title })),
+                    ]}
+                    value={taskRequirementId}
+                    onChange={setTaskRequirementId}
+                    placeholder={t('work:task.selectRequirement')}
+                    noMatchesText={t('work:task.noMatches')}
+                  />
+                  <button type="button" onClick={() => { setShowInlineReq(true); setTaskCreateError(''); }} className={ROW_ADD_BTN_CLS}>{t('work:task.newRequirementInline')}</button>
                 </div>
-              )}
-            </div>
-            <div>
-              <label className="block text-sm text-fg-secondary mb-1.5">{t('work:task.blockedBy')}</label>
-              <MultiSearchableSelect
-                options={Object.values(board).flat()
-                  .filter(tk => tk.status !== 'completed' && tk.status !== 'cancelled')
-                  .map(tk => ({ value: tk.id, label: tk.title }))}
-                selected={taskBlockedBy}
-                onAdd={id => setTaskBlockedBy([...taskBlockedBy, id])}
-                placeholder={t('work:task.selectDependency')}
+                {showInlineReq && (
+                  <div className="mt-2 space-y-1.5">
+                    <div className="flex gap-2">
+                      <input autoFocus value={inlineReqTitle} onChange={e => setInlineReqTitle(e.target.value)}
+                        placeholder={t('work:task.newReqInlinePlaceholder')}
+                        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void createInlineReq(); } }}
+                        className="flex-1 px-3 py-2 bg-surface-elevated border border-border-default rounded-lg text-sm focus:border-brand-500 outline-none" />
+                      <button type="button" onClick={() => void createInlineReq()} disabled={!inlineReqTitle.trim()}
+                        className="px-3 py-2 text-sm bg-brand-600 hover:bg-brand-500 rounded-lg text-white disabled:opacity-40">{t('common:create')}</button>
+                    </div>
+                    <p className="text-[11px] text-fg-tertiary">{taskProjectId ? t('work:task.newReqInlineHint') : t('work:task.newReqInlineNeedProject')}</p>
+                  </div>
+                )}
+              </div>
+              <label className={ROW_LABEL_CLS}>{t('work:task.assignToRequired')}<span className="text-red-500"> *</span></label>
+              <SearchableSelect
+                options={agents.map(a => ({ value: a.id, label: `${a.name} (${a.status})` }))}
+                value={taskAssignTo}
+                onChange={setTaskAssignTo}
+                placeholder={t('work:task.selectAgent')}
                 noMatchesText={t('work:task.noMatches')}
               />
-              {taskBlockedBy.length > 0 && (
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {taskBlockedBy.map(id => {
-                    const dep = Object.values(board).flat().find(tk => tk.id === id);
-                    return (
-                      <span key={id} className="inline-flex items-center gap-1 text-[11px] px-2 py-1 bg-amber-500/10 text-amber-600 rounded-full">
-                        {dep ? dep.title.slice(0, 30) : id.slice(-8)}
-                        <button onClick={() => setTaskBlockedBy(taskBlockedBy.filter(x => x !== id))} className="ml-0.5 text-amber-600/60 hover:text-amber-600">×</button>
-                      </span>
-                    );
-                  })}
-                </div>
+              <label className={ROW_LABEL_CLS}>{t('work:task.reviewerRequired')}<span className="text-red-500"> *</span></label>
+              <SearchableSelect
+                options={[
+                  ...users.map(u => ({ value: `human:${u.id}`, label: u.name })),
+                  ...agents.filter(a => a.id !== taskAssignTo).map(a => ({ value: `agent:${a.id}`, label: `${a.name} (${a.status})` })),
+                ]}
+                value={taskReviewer}
+                onChange={setTaskReviewer}
+                placeholder={t('work:task.selectReviewer')}
+                noMatchesText={t('work:task.noMatches')}
+              />
+              {taskType === 'scheduled' && (
+                <div className="col-span-2"><TaskScheduleFields value={taskScheduleDraft} onChange={setTaskScheduleDraft} /></div>
               )}
+              <label className={ROW_LABEL_CLS}>{t('work:task.blockedBy')}</label>
+              <div className="min-w-0">
+                <MultiSearchableSelect
+                  options={Object.values(board).flat()
+                    .filter(tk => tk.status !== 'completed' && tk.status !== 'cancelled')
+                    .map(tk => ({ value: tk.id, label: tk.title }))}
+                  selected={taskBlockedBy}
+                  onAdd={id => setTaskBlockedBy([...taskBlockedBy, id])}
+                  placeholder={t('work:task.selectDependency')}
+                  noMatchesText={t('work:task.noMatches')}
+                />
+                {taskBlockedBy.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {taskBlockedBy.map(id => {
+                      const dep = Object.values(board).flat().find(tk => tk.id === id);
+                      return (
+                        <span key={id} className="inline-flex items-center gap-1 text-[11px] px-2 py-1 bg-amber-500/10 text-amber-600 rounded-full">
+                          {dep ? dep.title.slice(0, 30) : id.slice(-8)}
+                          <button onClick={() => setTaskBlockedBy(taskBlockedBy.filter(x => x !== id))} className="ml-0.5 text-amber-600/60 hover:text-amber-600">×</button>
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
             {taskCreateError && <div className="px-3 py-2 bg-red-500/15 text-red-500 text-xs rounded-lg">{taskCreateError}</div>}
             <div className="flex justify-end gap-3 pt-1">
@@ -6973,33 +6995,27 @@ export function WorkPage({ authUser, previewMode, previewData }: { authUser?: Au
               <h3 className="text-base font-semibold text-fg-primary">{t('work:task.newRequirementModalTitle')}</h3>
               <p className="text-xs text-fg-tertiary mt-1">{t('work:task.newRequirementModalHint')}</p>
             </div>
-            <div>
-              <label className="block text-sm text-fg-secondary mb-1.5">{t('work:task.projectLabel')} <span className="text-red-500">*</span></label>
-              <SearchableSelect
-                options={projects.map(p => ({ value: p.id, label: p.name }))}
-                value={reqProjectId}
-                onChange={setReqProjectId}
-                placeholder={t('work:task.selectProject')}
-                noMatchesText={t('work:task.noMatches')}
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-fg-secondary mb-1.5">{t('work:task.titleField')} <span className="text-red-500">*</span></label>
+            <div className={ROW_GRID_CLS}>
+              <label className={ROW_LABEL_CLS}>{t('work:task.projectLabel')}<span className="text-red-500"> *</span></label>
+              <div className="flex items-center gap-2 min-w-0">
+                <SearchableSelect className="flex-1"
+                  options={projects.map(p => ({ value: p.id, label: p.name }))}
+                  value={reqProjectId}
+                  onChange={setReqProjectId}
+                  placeholder={t('work:task.selectProject')}
+                  noMatchesText={t('work:task.noMatches')}
+                />
+                <button type="button" onClick={() => setInlineProjectFor('req')} className={ROW_ADD_BTN_CLS}>{t('work:task.newProjectInline')}</button>
+              </div>
+              <label className={ROW_LABEL_CLS}>{t('work:task.titleField')}<span className="text-red-500"> *</span></label>
               <input value={reqTitle} onChange={e => setReqTitle(e.target.value)} placeholder={t('work:task.reqTitleExample')}
-                className="w-full px-3 py-2 bg-surface-elevated border border-border-default rounded-lg text-sm text-fg-primary focus:border-brand-500 outline-none" autoFocus={!isMobile}
+                className={ROW_INPUT_CLS} autoFocus={!isMobile}
                 onKeyDown={e => { if (e.key === 'Enter' && reqTitle.trim()) void handleCreateReq(); }} />
-            </div>
-            <div>
-              <label className="block text-sm text-fg-secondary mb-1.5">{t('work:task.descriptionField')} <span className="text-red-500">*</span></label>
+              <label className={ROW_LABEL_CLS}>{t('work:task.descriptionField')}<span className="text-red-500"> *</span></label>
               <textarea value={reqDesc} onChange={e => setReqDesc(e.target.value)} placeholder={t('work:task.reqDescPlaceholder')}
-                rows={3} className="w-full px-3 py-2 bg-surface-elevated border border-border-default rounded-lg text-sm text-fg-primary focus:border-brand-500 outline-none resize-none" />
-            </div>
-            <div>
-              <label className="block text-sm text-fg-secondary mb-1.5">{t('work:task.priorityField')}</label>
-              <select value={reqPriority} onChange={e => setReqPriority(e.target.value)}
-                className="w-full px-3 py-2 bg-surface-elevated border border-border-default rounded-lg text-sm text-fg-primary focus:border-brand-500 outline-none">
-                <option value="low">{t('work:priority.low')}</option><option value="medium">{t('work:priority.medium')}</option><option value="high">{t('work:priority.high')}</option><option value="urgent">{t('work:priority.urgent')}</option>
-              </select>
+                rows={3} className={`${ROW_INPUT_CLS} resize-none`} />
+              <label className={ROW_LABEL_CLS}>{t('work:task.priorityField')}</label>
+              <PriorityChips value={reqPriority} onChange={setReqPriority} />
             </div>
             {reqCreateError && <div className="px-3 py-2 bg-red-500/15 text-red-500 text-xs rounded-lg">{reqCreateError}</div>}
             <div className="flex justify-end gap-3 pt-1">
@@ -7398,6 +7414,21 @@ function RequirementDetailPanel({
 
   useEffect(() => { setDescDraft(req.description); setEditingDesc(false); }, [req.id, req.description]);
 
+  // Inline-edit state for the title / project / priority / tags config rows.
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(req.title);
+  const [editingTags, setEditingTags] = useState(false);
+  const [tagsDraft, setTagsDraft] = useState((req.tags ?? []).join(', '));
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { setTitleDraft(req.title); setEditingTitle(false); }, [req.id, req.title]);
+  useEffect(() => { setTagsDraft((req.tags ?? []).join(', ')); setEditingTags(false); }, [req.id, req.tags]);
+  useEffect(() => { if (editingTitle) titleInputRef.current?.focus(); }, [editingTitle]);
+
+  const updateReq = async (patch: { title?: string; description?: string; priority?: string; tags?: string[]; projectId?: string | null }) => {
+    try { await api.requirements.update(req.id, patch); onRefresh?.(); }
+    catch { /* keep the current value on failure */ }
+  };
+
   return (
     <div className="flex flex-col w-full h-full overflow-hidden bg-surface-primary shadow-xl shadow-black/8 ring-1 ring-border-default/20">
       {/* Header */}
@@ -7409,7 +7440,34 @@ function RequirementDetailPanel({
             </button>
           )}
           <h2 className="flex-1 min-w-0 pb-4 text-lg font-semibold text-fg-primary leading-snug">
-            {req.title}
+            {editingTitle ? (
+              <input
+                ref={titleInputRef}
+                value={titleDraft}
+                onChange={e => setTitleDraft(e.target.value)}
+                onBlur={() => {
+                  const next = titleDraft.trim();
+                  if (next && next !== req.title) void updateReq({ title: next });
+                  setEditingTitle(false);
+                }}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                  if (e.key === 'Escape') { setTitleDraft(req.title); setEditingTitle(false); }
+                }}
+                className="w-full bg-transparent border-b border-brand-500/40 text-lg font-semibold text-fg-primary focus:border-brand-500 outline-none"
+              />
+            ) : (
+              <span
+                className={`align-middle rounded px-0.5 -mx-0.5 transition-colors ${!isTerminal ? 'cursor-text hover:bg-surface-elevated/60' : ''}`}
+                onClick={!isTerminal ? () => setEditingTitle(true) : undefined}
+                role={!isTerminal ? 'button' : undefined}
+                tabIndex={!isTerminal ? 0 : undefined}
+                onKeyDown={!isTerminal ? e => e.key === 'Enter' && setEditingTitle(true) : undefined}
+                title={!isTerminal ? t('work:task.clickToEdit', { defaultValue: '点击编辑' }) : undefined}
+              >
+                {req.title}
+              </span>
+            )}
             {' '}
             <span className="text-[10px] font-bold text-brand-500 bg-brand-500/15 px-2 py-0.5 rounded align-middle">{t('work:task.requirementShort')}</span>
             {' '}
@@ -7495,35 +7553,70 @@ function RequirementDetailPanel({
             )}
           </div>
 
-          <div className="grid grid-cols-2 gap-3 text-xs">
-            <div className="bg-surface-elevated/60 rounded-lg p-2.5">
-              <span className="text-[10px] text-fg-tertiary block mb-1">{t('work:task.createdByLabel')}</span>
-              <span className="text-fg-secondary">{creatorName}</span>
-              {isAgent && <span className="text-[10px] text-brand-500 ml-1.5">{t('work:task.agentTag')}</span>}
+          {/* Config — editable fields, two pairs per row on wide panels */}
+          <div className="border-t border-border-default/60 pt-4">
+            <div className={ROW_GRID_2COL_CLS}>
+              <label className={ROW_LABEL_CLS}>{t('work:task.projectLabel')}</label>
+              <SearchableSelect
+                size="sm"
+                disabled={isTerminal}
+                options={[{ value: '', label: t('work:task.noProject') }, ...projects.map(p => ({ value: p.id, label: p.name }))]}
+                value={req.projectId ?? ''}
+                onChange={v => void updateReq({ projectId: v || null })}
+                placeholder={t('work:task.noProject')}
+                noMatchesText={t('work:task.noMatches')}
+              />
+
+              <label className={ROW_LABEL_CLS}>{t('work:task.priority')}</label>
+              <PriorityChips value={req.priority} onChange={v => void updateReq({ priority: v })} />
+
+              <label className={ROW_LABEL_CLS}>{t('work:task.tagsLabel')}</label>
+              {editingTags && !isTerminal ? (
+                <input
+                  autoFocus
+                  value={tagsDraft}
+                  onChange={e => setTagsDraft(e.target.value)}
+                  onBlur={() => {
+                    const tags = tagsDraft.split(',').map(s => s.trim()).filter(Boolean);
+                    const cur = req.tags ?? [];
+                    if (tags.join('\u0000') !== cur.join('\u0000')) void updateReq({ tags });
+                    setEditingTags(false);
+                  }}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                    if (e.key === 'Escape') { setTagsDraft((req.tags ?? []).join(', ')); setEditingTags(false); }
+                  }}
+                  placeholder={t('work:task.tagsPlaceholder')}
+                  className={`${ROW_INPUT_CLS} !py-1.5 !text-xs`}
+                />
+              ) : (
+                <div
+                  className={`flex flex-wrap items-center gap-1.5 rounded-lg -mx-2 px-2 py-1 transition-colors ${!isTerminal ? 'cursor-pointer hover:bg-surface-elevated/50' : ''}`}
+                  onClick={!isTerminal ? () => setEditingTags(true) : undefined}
+                  role={!isTerminal ? 'button' : undefined}
+                  tabIndex={!isTerminal ? 0 : undefined}
+                  onKeyDown={!isTerminal ? e => e.key === 'Enter' && setEditingTags(true) : undefined}
+                >
+                  {req.tags && req.tags.length > 0 ? req.tags.map(tag => (
+                    <span key={tag} className="text-[10px] bg-surface-elevated text-fg-secondary px-2 py-0.5 rounded-full">#{tag}</span>
+                  )) : <span className="text-xs text-fg-tertiary italic">{t('work:task.noTags')}</span>}
+                </div>
+              )}
             </div>
-            <div className="bg-surface-elevated/60 rounded-lg p-2.5">
-              <span className="text-[10px] text-fg-tertiary block mb-1">{t('work:task.createdLabel')}</span>
-              <span className="text-fg-secondary">{new Date(req.createdAt).toLocaleString()}</span>
+
+            {/* Read-only provenance */}
+            <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-fg-tertiary">
+              <span>{t('work:task.createdByLabel')}: <span className="text-fg-secondary">{creatorName}</span>{isAgent && <span className="text-brand-500 ml-1">{t('work:task.agentTag')}</span>}</span>
+              <span>{new Date(req.createdAt).toLocaleString()}</span>
+              {onProjectClick && reqProject && (
+                <button onClick={() => onProjectClick(reqProject.id)} className="hover:text-fg-secondary transition-colors">
+                  {t('work:task.projectLabel')}: {reqProject.name}
+                </button>
+              )}
+              {req.approvedBy && (
+                <span>{t('work:task.approvedBy')}: <span className="text-fg-secondary">{resolveActorName(req.approvedBy, agents, users) ?? req.approvedBy.slice(0, 12)}</span>{req.approvedAt && <span className="ml-1">{new Date(req.approvedAt).toLocaleDateString()}</span>}</span>
+              )}
             </div>
-            {reqProject && (
-              <div
-                className={`bg-surface-elevated/60 rounded-lg p-2.5 ${onProjectClick ? 'cursor-pointer hover:bg-surface-elevated transition-colors' : ''}`}
-                onClick={onProjectClick ? () => onProjectClick(reqProject.id) : undefined}
-                role={onProjectClick ? 'button' : undefined}
-                tabIndex={onProjectClick ? 0 : undefined}
-                onKeyDown={onProjectClick ? e => e.key === 'Enter' && onProjectClick(reqProject.id) : undefined}
-              >
-                <span className="text-[10px] text-fg-tertiary block mb-1">{t('work:task.projectLabel')}</span>
-                <span className="text-fg-secondary">{reqProject.name}</span>
-              </div>
-            )}
-            {req.approvedBy && (
-              <div className="bg-surface-elevated/60 rounded-lg p-2.5">
-                <span className="text-[10px] text-fg-tertiary block mb-1">{t('work:task.approvedBy')}</span>
-                <span className="text-fg-secondary">{resolveActorName(req.approvedBy, agents, users) ?? req.approvedBy.slice(0, 12)}</span>
-                {req.approvedAt && <span className="text-[10px] text-fg-tertiary ml-1">{new Date(req.approvedAt).toLocaleDateString()}</span>}
-              </div>
-            )}
           </div>
 
           {req.rejectedReason && (

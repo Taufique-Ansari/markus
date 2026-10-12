@@ -482,7 +482,7 @@ export class RequirementService {
    */
   updateRequirement(
     id: string,
-    data: { title?: string; description?: string; priority?: TaskPriority; tags?: string[] }
+    data: { title?: string; description?: string; priority?: TaskPriority; tags?: string[]; projectId?: string | null }
   ): Requirement {
     const req = this.requirements.get(id);
     if (!req) throw new Error(`Requirement ${id} not found`);
@@ -491,6 +491,7 @@ export class RequirementService {
     if (data.description !== undefined) req.description = data.description;
     if (data.priority !== undefined) req.priority = data.priority;
     if (data.tags !== undefined) req.tags = data.tags;
+    if (data.projectId !== undefined) req.projectId = data.projectId ?? undefined;
     req.updatedAt = new Date().toISOString();
 
     if (this.requirementRepo) {

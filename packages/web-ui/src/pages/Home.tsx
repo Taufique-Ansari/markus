@@ -22,6 +22,18 @@ import {
 } from '../lib/onboarding.ts';
 import { isLessonComplete } from '../lib/shortcut-lessons.ts';
 
+/** Derive onboarding LLM state (configured / markus / current provider label) from /settings/llm. */
+function llmStateFromSettings(d: {
+  defaultProvider: string;
+  providers: Record<string, { configured: boolean; displayName?: string }>;
+}): { configured: boolean; markus: boolean; providerLabel: string } {
+  return {
+    configured: Object.values(d.providers).some(p => p.configured),
+    markus: !!d.providers['markus']?.configured,
+    providerLabel: d.providers[d.defaultProvider]?.displayName ?? d.defaultProvider ?? '',
+  };
+}
+
 const DONUT_COLORS: Record<string, string> = {
   completed: '#22c55e', in_progress: '#8b5cf6', review: '#3b82f6',
   pending: '#f59e0b', failed: '#ef4444', blocked: '#f59e0b',
@@ -106,6 +118,9 @@ export function HomePage({ authUser, previewMode, previewData }: { authUser?: { 
   const [showHealthModal, setShowHealthModal] = useState(false);
   const [llmConfigured, setLlmConfigured] = useState<boolean | null>(null);
   const [markusConfigured, setMarkusConfigured] = useState(false);
+  // Display name of the current default provider (e.g. "Markus"), shown in the
+  // onboarding "配置模型" step so the user can see what's active right away.
+  const [defaultProviderLabel, setDefaultProviderLabel] = useState<string>('');
   const [freeCreditsClaimed, setFreeCreditsClaimed] = useState(false);
   const [browserConnected, setBrowserConnected] = useState<boolean | null>(null);
   const [showClaimModal, setShowClaimModal] = useState(false);
@@ -143,8 +158,10 @@ export function HomePage({ authUser, previewMode, previewData }: { authUser?: { 
     setFreeCreditsClaimed(true);
     api.cu.status().then(setCuQuota).catch(() => {});
     api.settings.getLlm().then(d => {
-      setLlmConfigured(Object.values(d.providers).some(p => p.configured));
-      setMarkusConfigured(!!d.providers['markus']?.configured);
+      const s = llmStateFromSettings(d);
+      setLlmConfigured(s.configured);
+      setMarkusConfigured(s.markus);
+      setDefaultProviderLabel(s.providerLabel);
     }).catch(() => {});
     // OverviewUsage listens for this and refetches hubApi.user.plan().
     window.dispatchEvent(new CustomEvent('markus:data-changed'));
@@ -211,8 +228,10 @@ export function HomePage({ authUser, previewMode, previewData }: { authUser?: { 
     api.usage.summary().then(d => setUsageInfo(d.usage)).catch(() => {});
     api.cu.status().then(setCuQuota).catch(() => {});
     const llmP = api.settings.getLlm().then(d => {
-      setLlmConfigured(Object.values(d.providers).some(p => p.configured));
-      setMarkusConfigured(!!d.providers['markus']?.configured);
+      const s = llmStateFromSettings(d);
+      setLlmConfigured(s.configured);
+      setMarkusConfigured(s.markus);
+      setDefaultProviderLabel(s.providerLabel);
     }).catch(() => {});
     const browserP = api.settings.getBrowser().then(d => {
       setBrowserConnected(d.extensionConnected);
@@ -287,7 +306,9 @@ export function HomePage({ authUser, previewMode, previewData }: { authUser?: { 
       done: llmReady,
       isSetup: true,
       label: t('checklist.setup.llm'),
-      desc: showClaimStep ? t('checklist.setup.llmDescHub') : t('checklist.setup.llmDesc'),
+      desc: llmReady && defaultProviderLabel
+        ? t('checklist.setup.llmDescConfigured', { provider: defaultProviderLabel })
+        : showClaimStep ? t('checklist.setup.llmDescHub') : t('checklist.setup.llmDesc'),
       action: t('checklist.setup.llmAction'),
       onClick: () => { window.location.hash = '#settings/providers'; },
     },

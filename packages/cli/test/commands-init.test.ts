@@ -21,6 +21,12 @@ describe('quickInit', () => {
     vi.spyOn(shared, 'getDefaultConfigPath').mockReturnValue(configPath);
   });
 
+  /** The canonical secret store (~/.markus/.env) under the temp HOME. */
+  function readEnvFile(): string {
+    const p = join(tmpHome, '.markus', '.env');
+    return existsSync(p) ? readFileSync(p, 'utf-8') : '';
+  }
+
   afterEach(() => {
     logSpy.mockRestore();
     vi.restoreAllMocks();
@@ -44,7 +50,10 @@ describe('quickInit', () => {
     expect(existsSync(configPath)).toBe(true);
     const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
     expect(cfg.llm.defaultProvider).toBe('openai');
-    expect(cfg.llm.providers.openai.apiKey).toBe('sk-testkey1234567890');
+    // Secret goes to the canonical store; the config keeps only the reference.
+    expect(cfg.llm.providers.openai.apiKey).toBeUndefined();
+    expect(cfg.llm.providers.openai.apiKeyEnv).toBe('OPENAI_API_KEY');
+    expect(readEnvFile()).toContain('OPENAI_API_KEY=sk-testkey1234567890');
     expect(cfg.server.apiPort).toBe(9000);
 
     const output = logSpy.mock.calls.map(c => String(c[0])).join('\n');
@@ -66,7 +75,9 @@ describe('quickInit', () => {
 
     await quickInit({ nonInteractive: true, force: true });
     const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(cfg.llm.providers.anthropic.apiKey).toBe('sk-envkey1234567890');
+    expect(cfg.llm.providers.anthropic.apiKey).toBeUndefined();
+    expect(cfg.llm.providers.anthropic.apiKeyEnv).toBe('ANTHROPIC_API_KEY');
+    expect(readEnvFile()).toContain('ANTHROPIC_API_KEY=sk-envkey1234567890');
     expect(cfg.llm.defaultProvider).toBe('anthropic');
   });
 
@@ -116,7 +127,8 @@ describe('quickInit', () => {
       force: true,
     });
     const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(cfg.llm.providers.google.apiKey).toBe('google-key1234567890');
+    expect(cfg.llm.providers.google.apiKey).toBeUndefined();
+    expect(readEnvFile()).toContain('GOOGLE_API_KEY=google-key1234567890');
     expect(cfg.llm.defaultProvider).toBe('google');
   });
 
@@ -139,7 +151,8 @@ describe('quickInit', () => {
       force: true,
     });
     const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(cfg.llm.providers.deepseek.apiKey).toBe('sk-deepseek1234567890');
+    expect(cfg.llm.providers.deepseek.apiKey).toBeUndefined();
+    expect(readEnvFile()).toContain('DEEPSEEK_API_KEY=sk-deepseek1234567890');
     expect(cfg.llm.defaultProvider).toBe('deepseek');
   });
 
@@ -151,7 +164,8 @@ describe('quickInit', () => {
       force: true,
     });
     const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(cfg.llm.providers.siliconflow.apiKey).toBe('sf-key1234567890123456');
+    expect(cfg.llm.providers.siliconflow.apiKey).toBeUndefined();
+    expect(readEnvFile()).toContain('SILICONFLOW_API_KEY=sf-key1234567890123456');
   });
 
   it('non-interactive openrouter provider saves config', async () => {
@@ -162,7 +176,8 @@ describe('quickInit', () => {
       force: true,
     });
     const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(cfg.llm.providers.openrouter.apiKey).toBe('or-key1234567890123456');
+    expect(cfg.llm.providers.openrouter.apiKey).toBeUndefined();
+    expect(readEnvFile()).toContain('OPENROUTER_API_KEY=or-key1234567890123456');
   });
 
   it('non-interactive zai provider saves config', async () => {
@@ -173,7 +188,8 @@ describe('quickInit', () => {
       force: true,
     });
     const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
-    expect(cfg.llm.providers.zai.apiKey).toBe('zai-key1234567890123');
+    expect(cfg.llm.providers.zai.apiKey).toBeUndefined();
+    expect(readEnvFile()).toContain('ZAI_API_KEY=zai-key1234567890123');
   });
 
   it('imports from openclaw config when present', async () => {

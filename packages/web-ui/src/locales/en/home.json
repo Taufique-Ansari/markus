@@ -67,6 +67,7 @@
       "llm": "Configure AI Model",
       "llmDesc": "Set up your LLM provider API key — this is required for agents to work",
       "llmDescHub": "Use Markus Cloud AI, or add your own provider API key — required for agents to work",
+      "llmDescConfigured": "Current default provider: {{provider}}. You can change it anytime in Settings.",
       "llmAction": "Configure",
       "search": "Configure Search Engine",
       "searchDesc": "Set up a search API key so agents can search the internet",

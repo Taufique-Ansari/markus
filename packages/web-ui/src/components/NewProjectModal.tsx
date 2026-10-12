@@ -1,14 +1,24 @@
 import { useState, useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { api, type ProjectInfo, type TeamInfo } from '../api.ts';
+import { api, type ProjectInfo } from '../api.ts';
 import { useIsMobile } from '../hooks/useIsMobile.ts';
 import { useNativeBrowserOverlay } from '../hooks/useNativeBrowserOverlay.ts';
+import { ROW_GRID_CLS, ROW_LABEL_CLS, ROW_INPUT_CLS } from '../lib/dialogStyles.ts';
 
 interface Props {
   orgId?: string;
   onCreated: (project: ProjectInfo) => void;
   onClose: () => void;
+}
+
+// A project location may be a local directory (/Users/me/app) or a remote Git
+// repository (https://github.com/org/repo). They land in different fields so the
+// consumers of `repositories` (agent task context, project-tools) read the right
+// one — previously the modal sent `url` while every consumer read `localPath`,
+// so a typed location was silently dropped.
+function isRemoteUrl(v: string): boolean {
+  return /^(https?:\/\/|git@|ssh:\/\/|git:\/\/)/i.test(v);
 }
 
 export function NewProjectModal({ orgId, onCreated, onClose }: Props) {
@@ -18,16 +28,10 @@ export function NewProjectModal({ orgId, onCreated, onClose }: Props) {
   const [description, setDescription] = useState('');
   const [repoUrl, setRepoUrl] = useState('');
   const [defaultBranch, setDefaultBranch] = useState('main');
-  const [teamIds, setTeamIds] = useState<string[]>([]);
-  const [teams, setTeams] = useState<TeamInfo[]>([]);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
   const [touched, setTouched] = useState(false);
   const isMobile = useIsMobile();
-
-  useEffect(() => {
-    api.teams.list().then(d => setTeams(d.teams)).catch(() => {});
-  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
@@ -42,14 +46,18 @@ export function NewProjectModal({ orgId, onCreated, onClose }: Props) {
     setCreating(true);
     setError('');
     try {
-      const repos = repoUrl.trim()
-        ? [{ url: repoUrl.trim(), defaultBranch: defaultBranch.trim() || 'main' }]
+      const loc = repoUrl.trim();
+      const repos = loc
+        ? [{
+            ...(isRemoteUrl(loc) ? { url: loc } : { localPath: loc }),
+            defaultBranch: defaultBranch.trim() || 'main',
+            role: 'primary' as const,
+          }]
         : [];
       const res = await api.projects.create({
         name: name.trim(),
         description: description.trim() || undefined,
         repositories: repos.length > 0 ? repos : undefined,
-        teamIds: teamIds.length > 0 ? teamIds : undefined,
         orgId: orgId ?? 'default',
       } as Partial<ProjectInfo>);
       onCreated(res.project);
@@ -57,104 +65,76 @@ export function NewProjectModal({ orgId, onCreated, onClose }: Props) {
       setError(err instanceof Error ? err.message : t('project.failedToCreate'));
     }
     setCreating(false);
-  }, [name, description, repoUrl, defaultBranch, teamIds, orgId, creating, onCreated, t]);
+  }, [name, description, repoUrl, defaultBranch, orgId, creating, onCreated, t]);
 
   const nameInvalid = touched && !name.trim();
 
   return createPortal(
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-3" onClick={onClose}>
       <form
-        className={`bg-surface-secondary border border-border-default rounded-xl p-6 shadow-2xl max-h-[90dvh] overflow-y-auto ${isMobile ? 'w-full' : 'w-[520px]'}`}
+        className={`bg-surface-secondary border border-border-default rounded-xl p-6 shadow-2xl max-h-[90dvh] overflow-y-auto space-y-4 ${isMobile ? 'w-full' : 'w-[26rem]'}`}
         onClick={e => e.stopPropagation()}
         onSubmit={handleSubmit}
       >
-        <h3 className="text-base font-semibold mb-5">{t('project.newProject')}</h3>
-        <div className="space-y-4">
+        <h3 className="text-base font-semibold text-fg-primary">{t('project.newProject')}</h3>
+
+        <div className={ROW_GRID_CLS}>
+          <label className={ROW_LABEL_CLS}>{t('project.projectName')}</label>
           <div>
-            <label className="block text-xs text-fg-secondary mb-1.5 font-medium">{t('project.projectName')}</label>
             <input
               value={name}
               onChange={e => { setName(e.target.value); setError(''); }}
               onBlur={() => setTouched(true)}
               placeholder={t('project.projectNamePlaceholder')}
-              className={`input ${nameInvalid ? '!border-red-500 focus:!ring-red-500/25' : ''}`}
+              className={`${ROW_INPUT_CLS} ${nameInvalid ? '!border-red-500' : ''}`}
               autoFocus={!isMobile}
             />
             {nameInvalid && <p className="text-[11px] text-red-400 mt-1">{t('project.projectNameRequired')}</p>}
           </div>
 
-          <div>
-            <label className="block text-xs text-fg-secondary mb-1.5 font-medium">{t('project.description')}</label>
-            <textarea
-              value={description}
-              onChange={e => setDescription(e.target.value)}
-              placeholder={t('project.descriptionPlaceholder')}
-              className="input"
-              rows={3}
-            />
-          </div>
+          <label className={ROW_LABEL_CLS}>{t('project.description')}</label>
+          <textarea
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            placeholder={t('project.descriptionPlaceholder')}
+            className={`${ROW_INPUT_CLS} resize-none`}
+            rows={2}
+          />
 
-          {teams.length > 0 && (
-            <div>
-              <label className="block text-xs text-fg-secondary mb-1.5 font-medium">{t('project.assignTeams')}</label>
-              <div className="space-y-1 max-h-32 overflow-y-auto">
-                {teams.map(tm => {
-                  const checked = teamIds.includes(tm.id);
-                  return (
-                    <label key={tm.id} className="flex items-center gap-2 text-xs text-fg-secondary cursor-pointer hover:text-fg-primary py-0.5">
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => setTeamIds(prev =>
-                          checked ? prev.filter(id => id !== tm.id) : [...prev, tm.id]
-                        )}
-                        className="accent-brand-500"
-                      />
-                      <span className="truncate">{tm.name}</span>
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-          )}
+          <label className={ROW_LABEL_CLS}>{t('project.repositoryUrl')}</label>
+          <input
+            value={repoUrl}
+            onChange={e => setRepoUrl(e.target.value)}
+            placeholder={t('project.repositoryPlaceholder')}
+            className={`${ROW_INPUT_CLS} placeholder:text-[11px]`}
+          />
 
-          <div className="grid grid-cols-[1fr_auto] gap-3">
-            <div>
-              <label className="block text-xs text-fg-secondary mb-1.5 font-medium">{t('project.repositoryUrl')}</label>
+          {repoUrl.trim() && (
+            <>
+              <label className={ROW_LABEL_CLS}>{t('project.branch')}</label>
               <input
-                value={repoUrl}
-                onChange={e => setRepoUrl(e.target.value)}
-                placeholder={t('project.repositoryPlaceholder')}
-                className="input"
+                value={defaultBranch}
+                onChange={e => setDefaultBranch(e.target.value)}
+                placeholder={t('project.branchPlaceholder')}
+                className={ROW_INPUT_CLS}
               />
-            </div>
-            {repoUrl.trim() && (
-              <div>
-                <label className="block text-xs text-fg-secondary mb-1.5 font-medium">{t('project.branch')}</label>
-                <input
-                  value={defaultBranch}
-                  onChange={e => setDefaultBranch(e.target.value)}
-                  placeholder={t('project.branchPlaceholder')}
-                  className="input !w-24"
-                />
-              </div>
-            )}
-          </div>
-
-          {error && (
-            <div className="text-xs text-red-400 bg-red-500/10 rounded-lg px-3 py-2">{error}</div>
+            </>
           )}
+        </div>
 
-          <div className="flex justify-end gap-3 pt-2">
-            <button type="button" onClick={onClose} className="px-4 py-2 text-sm border border-border-default rounded-lg hover:bg-surface-elevated text-fg-secondary">{t('common:cancel')}</button>
-            <button
-              type="submit"
-              disabled={!name.trim() || creating}
-              className="px-4 py-2 text-sm bg-brand-600 hover:bg-brand-500 disabled:opacity-40 rounded-lg text-white"
-            >
-              {creating ? t('common:creating') : t('project.createProject')}
-            </button>
-          </div>
+        {error && (
+          <div className="text-xs text-red-400 bg-red-500/10 rounded-lg px-3 py-2">{error}</div>
+        )}
+
+        <div className="flex justify-end gap-3 pt-1">
+          <button type="button" onClick={onClose} className="px-4 py-2 text-sm border border-border-default rounded-lg hover:bg-surface-elevated text-fg-secondary">{t('common:cancel')}</button>
+          <button
+            type="submit"
+            disabled={!name.trim() || creating}
+            className="px-4 py-2 text-sm bg-brand-600 hover:bg-brand-500 disabled:opacity-40 rounded-lg text-white"
+          >
+            {creating ? t('common:creating') : t('project.createProject')}
+          </button>
         </div>
       </form>
     </div>,

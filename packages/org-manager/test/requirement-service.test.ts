@@ -147,8 +147,16 @@ describe('RequirementService', () => {
   describe('CRUD helpers', () => {
     it('updates, links tasks, lists, and deletes', () => {
       const req = service.createRequirement(baseRequest());
-      service.updateRequirement(req.id, { priority: 'high' });
+      service.updateRequirement(req.id, { priority: 'high', title: 'renamed', projectId: 'proj-2' });
       expect(service.getRequirement(req.id)?.priority).toBe('high');
+      expect(service.getRequirement(req.id)?.title).toBe('renamed');
+      expect(service.getRequirement(req.id)?.projectId).toBe('proj-2');
+
+      // Clearing the project is supported (empty → undefined), and persisting
+      // projectId is delegated to the repo (single writer).
+      service.updateRequirement(req.id, { projectId: null });
+      expect(service.getRequirement(req.id)?.projectId).toBeUndefined();
+      expect(repo.update).toHaveBeenCalledWith(req.id, expect.objectContaining({ projectId: null }));
 
       service.linkTask(req.id, 'task-1');
       expect(service.getRequirement(req.id)?.taskIds).toContain('task-1');

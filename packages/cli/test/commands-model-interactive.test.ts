@@ -21,10 +21,20 @@ describe('model command interactive mode', () => {
   let tmpDir: string;
   let configPath: string;
   let logSpy: ReturnType<typeof vi.spyOn>;
+  let savedApiKeyEnv: Record<string, string | undefined>;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'markus-model-interactive-'));
     configPath = join(tmpDir, 'markus.json');
+    // Isolate the secret store, and snapshot provider env vars — persisting a
+    // key writes it into `process.env` (setEnvValue), which must not leak
+    // between tests (it would prefill the wizard's key prompt).
+    savedApiKeyEnv = {};
+    for (const k of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'DEEPSEEK_API_KEY']) {
+      savedApiKeyEnv[k] = process.env[k];
+      delete process.env[k];
+    }
+    vi.stubEnv('MARKUS_HOME', tmpDir);
     logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     answerQueue.length = 0;
     closeMock.mockClear();
@@ -63,6 +73,11 @@ describe('model command interactive mode', () => {
     logSpy.mockRestore();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    for (const [k, v] of Object.entries(savedApiKeyEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -85,7 +100,10 @@ describe('model command interactive mode', () => {
 
     const output = logSpy.mock.calls.map(c => String(c[0])).join('\n');
     expect(output).toMatch(/saved|valid/i);
-    expect(readFileSync(configPath, 'utf-8')).toContain('sk-anthropic1234567890');
+    // Secret → canonical store; the config keeps only the reference.
+    expect(readFileSync(configPath, 'utf-8')).not.toContain('sk-anthropic1234567890');
+    expect(readFileSync(configPath, 'utf-8')).toContain('ANTHROPIC_API_KEY');
+    expect(readFileSync(join(tmpDir, '.env'), 'utf-8')).toContain('ANTHROPIC_API_KEY=sk-anthropic1234567890');
     expect(closeMock).toHaveBeenCalled();
   });
 

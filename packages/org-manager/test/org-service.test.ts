@@ -273,12 +273,27 @@ describe('OrganizationService', () => {
   });
 
   describe('seedDefaultTeam', () => {
-    it('seeds secretary when no agents exist', async () => {
+    it('seeds the Secretary with an English name for an English owner', async () => {
       await service.createOrganization('Acme', 'owner-1', 'org-1');
+      service.addHumanUser('org-1', 'Owner', 'owner', { id: 'owner-1' });
+      service.updateHumanPreferences('owner-1', { locale: 'en-US' });
       agentManager.listAgents.mockReturnValue([]);
       await service.seedDefaultTeam('org-1', 'owner-1');
       expect(agentManager.createAgent).toHaveBeenCalledWith(expect.objectContaining({
         name: 'Secretary',
+        roleName: 'secretary',
+        orgId: 'org-1',
+      }));
+    });
+
+    it('localizes the seeded Secretary name to the owner locale (zh-CN → 秘书)', async () => {
+      await service.createOrganization('Acme', 'owner-1', 'org-1');
+      service.addHumanUser('org-1', 'Owner', 'owner', { id: 'owner-1' });
+      service.updateHumanPreferences('owner-1', { locale: 'zh-CN' });
+      agentManager.listAgents.mockReturnValue([]);
+      await service.seedDefaultTeam('org-1', 'owner-1');
+      expect(agentManager.createAgent).toHaveBeenCalledWith(expect.objectContaining({
+        name: '秘书',
         roleName: 'secretary',
         orgId: 'org-1',
       }));
