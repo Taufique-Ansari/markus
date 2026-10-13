@@ -323,7 +323,14 @@ describe('InstancesSection — a second bot on the same platform', () => {
     // Exactly one platform group, containing both bots.
     expect(screen.getAllByTestId('platform-group-feishu')).toHaveLength(1);
     // The collapsed row shows the bound agent — that is how two bots differ.
-    expect(within(b).getByTestId('instance-agent-bi_fs_sales').textContent).toContain('Sales');
+    // The agent list is fetched asynchronously (`useAgentOptions`), so the name
+    // resolves one tick after the card appears: the row shows the raw id first
+    // and swaps to the name. Assert through `waitFor`, otherwise this races the
+    // `setAgents` re-render and goes red on a loaded CI runner while staying
+    // green on a fast local one — a real flake, not a real regression.
+    await waitFor(() =>
+      expect(within(b).getByTestId('instance-agent-bi_fs_sales').textContent).toContain('Sales'),
+    );
     expect(within(a).queryByTestId('instance-agent-bi_fs_default')).toBeNull();
   });
 
