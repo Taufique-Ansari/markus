@@ -223,6 +223,29 @@ always **optional** — a required field would silently disable the platform (th
 `isManifestEnabled` rule). Feishu's key is the pre-existing `notifyChatId`, so a
 config written before the annotation existed keeps resolving.
 
+### Development-only platforms (`devOnly`)
+
+At manifest level a platform may carry `devOnly: true`. It means: the adapter
+exists and is unit-tested, but the integration has **not** been verified end to
+end against the live service (on a desktop install there is no public URL and no
+real credentials for it). A production build must not offer it.
+
+| platform | `devOnly` | why |
+| --- | --- | --- |
+| `feishu` | — | verified end to end (long connection) |
+| `telegram` | — | verified end to end (long polling) |
+| `slack` | ✅ | adapter + manifest only; no live verification |
+| `whatsapp` | ✅ | adapter + manifest only; no live verification |
+| `discord` | ✅ | adapter + manifest only; no live verification |
+
+It is a **presentation** gate, not a capability gate: the manifest, the adapter
+and the Settings API are all unchanged, so a build can be exercised in
+development and the flag flipped without touching anything else. The single
+reader is the Settings UI (`visiblePlatformIds`, driven by
+`import.meta.env.DEV`), which drops the platform — and any instance of it —
+outside a development build. The set of gated platforms is pinned by
+`packages/comms/test/platform-registry.test.ts`.
+
 ### `feishu`
 
 | key | type | required | secret | default |
@@ -269,6 +292,9 @@ Probe: `getMe` (the same call `TelegramAdapter.connect()` makes).
 
 ### `slack`
 
+> **Development-only** (`devOnly: true`): the adapter is unit-tested but has not
+> been verified end to end against Slack, so a production build does not offer it.
+
 | key | type | required | secret | default |
 | --- | --- | --- | --- | --- |
 | `botToken` | password | yes | ✅ | |
@@ -295,6 +321,10 @@ valid webhook-only configuration.
 
 ### `whatsapp`
 
+> **Development-only** (`devOnly: true`): the adapter is unit-tested but has not
+> been verified end to end against Meta's Cloud API, so a production build does
+> not offer it.
+
 | key | type | required | secret | default |
 | --- | --- | --- | --- | --- |
 | `phoneNumberId` | text | yes | | |
@@ -319,6 +349,9 @@ WhatsApp is the **only** platform whose notification destination is a person
 concept, so removing it would leave WhatsApp with no notification path at all.
 
 ### `discord`
+
+> **Development-only** (`devOnly: true`): the adapter is unit-tested but has not
+> been verified end to end against Discord, so a production build does not offer it.
 
 | key | type | required | secret | default |
 | --- | --- | --- | --- | --- |

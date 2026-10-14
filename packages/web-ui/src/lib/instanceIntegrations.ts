@@ -373,19 +373,33 @@ export function groupByPlatform(
  * platform can still get its *first* bot) unioned with every platform that
  * already has an instance — a platform that disappeared from the registry must
  * still be visible and deletable rather than silently hidden.
+ *
+ * `devOnly` platforms are the one deliberate exception to the union rule: they
+ * are offered **only** in a development build. In production they are dropped
+ * from the catalog *and* their instances are dropped, so a production user can
+ * never see (or be tempted by) an integration we cannot honestly claim works.
+ * `import.meta.env.DEV` is the single dev signal, passed in by the caller so the
+ * decision stays a pure, testable function of its inputs.
  */
 export function visiblePlatformIds(
-  catalog: Array<{ id: string }>,
+  catalog: Array<{ id: string; devOnly?: boolean }>,
   instances: InstanceStatus[],
+  options: { devMode?: boolean } = {},
 ): string[] {
+  const devMode = options.devMode ?? false;
+  const devOnlyIds = new Set(
+    catalog.filter((p) => p.devOnly && !devMode).map((p) => p.id),
+  );
   const ids: string[] = [];
   const seen = new Set<string>();
   for (const platform of catalog) {
+    if (devOnlyIds.has(platform.id)) continue;
     if (seen.has(platform.id)) continue;
     seen.add(platform.id);
     ids.push(platform.id);
   }
   for (const instance of instances) {
+    if (devOnlyIds.has(instance.platform)) continue;
     if (seen.has(instance.platform)) continue;
     seen.add(instance.platform);
     ids.push(instance.platform);

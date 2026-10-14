@@ -262,6 +262,21 @@ export interface PlatformManifest {
    * Absent means "off until the user enables it", i.e. `false`.
    */
   defaultEnabled?: boolean;
+  /**
+   * Not offered to users in a production build — shown only in development.
+   *
+   * A platform is marked dev-only while its adapter exists and is unit-tested
+   * but has **not** been verified end to end against the live service (no
+   * public URL / no real credentials on a desktop install). Offering it to
+   * production users would present an integration we cannot honestly claim
+   * works.
+   *
+   * This is a **presentation** gate, not a capability gate: the manifest, the
+   * adapter and the API are all unchanged, so a build can be verified in dev
+   * and the flag flipped without touching anything else. The one reader is the
+   * Settings UI (`visiblePlatformIds`), driven by `import.meta.env.DEV`.
+   */
+  devOnly?: boolean;
   createAdapter(): CommAdapter;
   testConnection?(config: Record<string, unknown>): Promise<TestConnectionResult>;
   /**
@@ -639,6 +654,7 @@ const SLACK_MANIFEST: PlatformManifest = {
   id: 'slack',
   label: 'Slack',
   docsUrl: 'https://api.slack.com/authentication',
+  devOnly: true,
   fields: [
     {
       key: 'botToken',
@@ -814,6 +830,7 @@ const WHATSAPP_MANIFEST: PlatformManifest = {
   id: 'whatsapp',
   label: 'WhatsApp',
   docsUrl: 'https://developers.facebook.com/docs/whatsapp/cloud-api',
+  devOnly: true,
   fields: [
     {
       key: 'phoneNumberId',
@@ -922,6 +939,7 @@ const DISCORD_MANIFEST: PlatformManifest = {
   id: 'discord',
   label: 'Discord',
   docsUrl: 'https://discord.com/developers/docs/intro',
+  devOnly: true,
   fields: [
     {
       key: 'botToken',

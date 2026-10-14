@@ -52,6 +52,13 @@ export interface PlatformStatus {
   id: string;
   label: string;
   docsUrl?: string;
+  /**
+   * Development-only platform: the manifest exists and is unit-tested but the
+   * integration has not been verified end to end against the live service, so a
+   * production build must not offer it. Passed through verbatim; the Settings UI
+   * is the one reader that acts on it. See `PlatformManifest.devOnly`.
+   */
+  devOnly?: boolean;
   capabilities: PlatformCapabilities;
   fields: PlatformField[];
   defaultEnabled: boolean;
@@ -217,6 +224,7 @@ export function buildPlatformStatus(
     id: manifest.id,
     label: manifest.label,
     docsUrl: manifest.docsUrl,
+    devOnly: manifest.devOnly,
     capabilities: manifest.capabilities,
     fields: manifest.fields,
     defaultEnabled: manifest.defaultEnabled ?? false,
@@ -250,6 +258,7 @@ export function flattenStatus(status: PlatformStatus): Record<string, unknown> {
     id: status.id,
     label: status.label,
     docsUrl: status.docsUrl,
+    devOnly: status.devOnly,
     capabilities: status.capabilities,
     fields: status.fields,
     defaultEnabled: status.defaultEnabled,

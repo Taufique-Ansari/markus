@@ -79,6 +79,28 @@ const FEISHU_PLATFORM: PlatformStatus = {
   secrets: { appSecret: { hasValue: true } },
 };
 
+/**
+ * A platform shipped `devOnly`: its adapter is unit-tested but the integration
+ * has not been verified end to end against the live service, so a production
+ * build must not offer it.
+ */
+const SLACK_DEVONLY: PlatformStatus = {
+  id: 'slack',
+  label: 'Slack',
+  devOnly: true,
+  capabilities: { inbound: true, outbound: true, threads: true, cards: true },
+  fields: [
+    { key: 'botToken', label: 'Bot Token', type: 'password', required: true, secret: true },
+    { key: 'agentId', label: 'Agent', type: 'agent', required: false },
+  ],
+  defaultEnabled: false,
+  enabled: false,
+  connected: false,
+  hasConfig: false,
+  values: {},
+  secrets: { botToken: { hasValue: false } },
+};
+
 function instance(over: Partial<InstanceStatus> = {}): InstanceStatus {
   return {
     id: 'bi_mm_default',
@@ -229,6 +251,47 @@ describe('lib/instanceIntegrations — pure logic', () => {
     );
     // A platform dropped from the registry keeps its bots visible and deletable.
     expect(ids).toEqual(['feishu', 'slack', 'retired_platform']);
+  });
+
+  // ── dev-only platforms (unverified against the live service) ───────────────
+  // A manifest may ship as `devOnly` while its adapter is unit-tested but not
+  // verified end to end. It must be invisible in a production build, and the
+  // union rule above must NOT rescue it — not even when a bot row exists.
+
+  const DEV_CATALOG = [
+    { id: 'feishu' },
+    { id: 'telegram' },
+    { id: 'slack', devOnly: true },
+    { id: 'discord', devOnly: true },
+  ];
+
+  it('hides dev-only platforms in a production build', () => {
+    expect(visiblePlatformIds(DEV_CATALOG, [], { devMode: false })).toEqual([
+      'feishu',
+      'telegram',
+    ]);
+  });
+
+  it('shows dev-only platforms in a development build', () => {
+    expect(visiblePlatformIds(DEV_CATALOG, [], { devMode: true })).toEqual([
+      'feishu',
+      'telegram',
+      'slack',
+      'discord',
+    ]);
+  });
+
+  it('hides a dev-only platform that already has a bot, in a production build', () => {
+    const ids = visiblePlatformIds(DEV_CATALOG, [instance({ platform: 'slack' })], {
+      devMode: false,
+    });
+    expect(ids).not.toContain('slack');
+    expect(ids).toEqual(['feishu', 'telegram']);
+  });
+
+  it('defaults to production (dev-only hidden) when the caller passes no options', () => {
+    // The safe default: an omission must never *expose* an unverified platform.
+    expect(visiblePlatformIds(DEV_CATALOG, [])).toEqual(['feishu', 'telegram']);
   });
 });
 
@@ -927,5 +990,89 @@ describe('InstanceCard — guided setup and manual credentials are mutually excl
     // No chooser, no guided panel: the credential inputs are simply present.
     expect(within(draft).queryByTestId(/^setup-method-/)).toBeNull();
     expect(within(draft).getByTestId('integration-field-serverUrl')).toBeTruthy();
+  });
+});
+
+// ─── dev-only platforms are not offered in production ────────────────────────
+
+/**
+ * The pure filter is covered next to `visiblePlatformIds`; this block exists
+ * because a filter nobody calls is worthless. It renders the *section* in both
+ * builds and asserts what a user would actually see — the failure mode being
+ * guarded is "the option is computed and then ignored", which no amount of
+ * unit-testing the pure function can catch.
+ */
+describe('InstancesSection — dev-only platforms', () => {
+  const catalog = [FEISHU_PLATFORM, SLACK_DEVONLY];
+
+  it('does not offer a dev-only platform in a production build', async () => {
+    const { client } = clientStub();
+    render(
+      <InstancesSection
+        loadPlatforms={() => Promise.resolve(catalog)}
+        loadInstances={() => Promise.resolve([])}
+        client={client}
+        loadAgents={loadAgents}
+        devMode={false}
+      />,
+    );
+
+    expect(await screen.findByTestId('platform-group-feishu')).toBeTruthy();
+    expect(screen.queryByTestId('platform-group-slack')).toBeNull();
+    expect(screen.queryByTestId('add-bot-slack')).toBeNull();
+  });
+
+  it('offers it in a development build', async () => {
+    const { client } = clientStub();
+    render(
+      <InstancesSection
+        loadPlatforms={() => Promise.resolve(catalog)}
+        loadInstances={() => Promise.resolve([])}
+        client={client}
+        loadAgents={loadAgents}
+        devMode
+      />,
+    );
+
+    expect(await screen.findByTestId('platform-group-slack')).toBeTruthy();
+    expect(screen.getByTestId('add-bot-slack')).toBeTruthy();
+  });
+
+  it('hides a dev-only bot that already exists, in a production build', async () => {
+    const { client } = clientStub();
+    render(
+      <InstancesSection
+        loadPlatforms={() => Promise.resolve(catalog)}
+        loadInstances={() =>
+          Promise.resolve([instance({ id: 'bi_slack_1', platform: 'slack' })])
+        }
+        client={client}
+        loadAgents={loadAgents}
+        devMode={false}
+      />,
+    );
+
+    // The union rule that rescues a *retired* platform must not resurrect a
+    // deliberately hidden one.
+    expect(await screen.findByTestId('platform-group-feishu')).toBeTruthy();
+    expect(screen.queryByTestId('platform-group-slack')).toBeNull();
+    expect(screen.queryByTestId('instance-card-bi_slack_1')).toBeNull();
+  });
+
+  it('defaults to the build signal (dev in tests) when no override is passed', async () => {
+    const { client } = clientStub();
+    render(
+      <InstancesSection
+        loadPlatforms={() => Promise.resolve(catalog)}
+        loadInstances={() => Promise.resolve([])}
+        client={client}
+        loadAgents={loadAgents}
+      />,
+    );
+
+    // Tests run with `import.meta.env.DEV === true`, so the default must show it
+    // — proving the production hiding above came from the injection, not from a
+    // hard-coded "hide slack".
+    expect(await screen.findByTestId('platform-group-slack')).toBeTruthy();
   });
 });

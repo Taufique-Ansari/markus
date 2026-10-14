@@ -1013,6 +1013,14 @@ gateway sessions and Telegram long polling against live services are unproven.
 desktop install does not have.
 - `connected` has a real source only for Feishu.
 
+**Therefore Slack, WhatsApp and Discord are marked `devOnly` in the registry**:
+their adapters and manifests stay in the tree (unit-tested, and exercised in
+development), but a production build does not offer them in Settings. The gate is
+presentation-only and lives in one place — `visiblePlatformIds`, driven by
+`import.meta.env.DEV` — so promoting a platform after live verification is a
+one-line flag flip, pinned by `platform-registry.test.ts` (see
+`packages/comms/docs/platform-manifest.md` → *Development-only platforms*).
+
 **Deliberately not delivered:**
 
 - Slack `slash_commands` / `interactive` envelopes are ACKed and logged, not
@@ -1025,9 +1033,9 @@ remain two facts.
 **`MARKUS_ACTION_SECRET` is derived, not configured.** It is resolved through
 `resolveActionSecret()` — an explicit env var when set, otherwise a random secret
 generated once at `~/.markus/action-secret`. Nothing in the product surfaces it.
-Independently, an install whose Secretary has no addressable binding has no level-3
+Independently, an install whose Secretary has no addressable binding has no
 terminus: the dispatcher reports it as undeliverable rather than swallowing it
-(§7.4), and the Settings notification-target field is what configures it.
+(§7.3), and the Settings notification destination is what configures it.
 
 **Operational trap found, not fixed here (pre-existing):** `initSqliteStorage`
 swallows *all* errors and returns `null`, so a repository-wiring programming error

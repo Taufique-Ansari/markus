@@ -398,3 +398,38 @@ describe('listChannels (channel picker)', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+// ─── dev-only platforms ──────────────────────────────────────────────────────
+
+/**
+ * A platform is `devOnly` while its adapter is unit-tested but the integration
+ * has **not** been verified end to end against the live service. Such a platform
+ * must not be offered to production users (the Settings UI hides it outside
+ * `import.meta.env.DEV`).
+ *
+ * This pins *which* platforms are gated, so flipping the flag — in either
+ * direction — is a deliberate change with a failing test, not a silent side
+ * effect of adding an adapter.
+ */
+describe('registry — dev-only platforms', () => {
+  it('gates exactly the platforms that are not verified against the live service', () => {
+    const devOnly = PLATFORM_MANIFESTS.filter((m) => m.devOnly).map((m) => m.id).sort();
+    expect(devOnly).toEqual(['discord', 'slack', 'whatsapp']);
+  });
+
+  it('keeps the verified platforms (feishu, telegram) visible in production', () => {
+    for (const id of ['feishu', 'telegram']) {
+      expect(getManifest(id)!.devOnly).toBeUndefined();
+    }
+  });
+
+  it('does not gate a platform on its capabilities — it is a presentation flag only', () => {
+    // The gated platforms still declare full manifests; hiding is a UI decision,
+    // so an already-configured bot keeps a working adapter.
+    for (const id of ['slack', 'whatsapp', 'discord']) {
+      const manifest = getManifest(id)!;
+      expect(manifest.fields.length).toBeGreaterThan(0);
+      expect(typeof manifest.createAdapter).toBe('function');
+    }
+  });
+});

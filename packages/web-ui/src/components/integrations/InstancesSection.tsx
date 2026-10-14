@@ -44,6 +44,15 @@ export interface InstancesSectionProps {
   extras?: Record<string, PlatformExtras>;
   /** Override the agent list for agent pickers. Defaults to the cached API. */
   loadAgents?: () => Promise<AgentOption[]>;
+  /**
+   * Development mode — decides whether `devOnly` platforms are offered.
+   *
+   * Defaults to the build's own signal (`import.meta.env.DEV`), which is the one
+   * source of truth in production. It is injectable purely so a test can render
+   * *both* builds and prove the section actually consumes the flag — a component
+   * that silently ignored it would otherwise pass every unit test.
+   */
+  devMode?: boolean;
   defaultExpanded?: boolean;
 }
 
@@ -63,6 +72,7 @@ export function InstancesSection({
   client = defaultInstanceClient,
   extras = PLATFORM_EXTRAS,
   loadAgents,
+  devMode = import.meta.env.DEV,
   defaultExpanded = false,
 }: InstancesSectionProps) {
   const { t } = useTranslation(['settings', 'common']);
@@ -119,8 +129,8 @@ export function InstancesSection({
     [platforms, t],
   );
   const platformIds = useMemo(
-    () => visiblePlatformIds(platforms, instances),
-    [platforms, instances],
+    () => visiblePlatformIds(platforms, instances, { devMode }),
+    [platforms, instances, devMode],
   );
 
   const startAdd = useCallback((platform: string) => {

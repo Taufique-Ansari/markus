@@ -74,6 +74,17 @@ export interface PlatformStatus {
   id: string;
   label: string;
   docsUrl?: string;
+  /**
+   * Development-only platform — the adapter exists and is unit-tested but the
+   * integration has not been verified end to end against the live service, so a
+   * production build must not offer it. Mirrors `PlatformManifest.devOnly`.
+   *
+   * A **presentation** gate, enforced in one place (`visiblePlatformIds`, driven
+   * by `import.meta.env.DEV`), not a capability gate: the manifest, adapter and
+   * API are unchanged, so a dev build can verify it and the flag can be flipped
+   * without touching anything else.
+   */
+  devOnly?: boolean;
   capabilities: PlatformCapabilities;
   fields: PlatformField[];
   defaultEnabled: boolean;
