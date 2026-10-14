@@ -11,29 +11,47 @@
  */
 import {
   OutboundDispatcher,
+  RepoNotifyPreferenceSource,
   RepoNotifyTargetLookup,
   RouterOutboundSink,
   renderCapabilitiesOf,
   getManifest,
   type BindingRowLike,
-  type InstanceRowLike,
+  type InstanceSource,
   type NotificationSource,
-  type NotifyTarget,
+  type SendOptions,
+  type PlatformField,
 } from '@markus/comms';
 import { createLogger } from '@markus/shared';
 
 const log = createLogger('outbound-setup');
 
 export interface OutboundWiringOptions {
-  router: { sendToChannel(platform: string, channelId: string, content: string, instanceId?: string): Promise<string | undefined> };
+  router: {
+    sendToChannel(
+      platform: string,
+      channelId: string,
+      content: string,
+      instanceId?: string,
+      options?: SendOptions,
+    ): Promise<string | undefined>;
+  };
   /** `channel_bindings` reader. Absent ⇒ dispatch is not wired. */
   bindingRepo?: { listByOrg(orgId: string): BindingRowLike[] };
-  /** `platform_instances` reader — resolves a binding's instance to its platform. */
-  instanceRepo?: { findById(id: string): InstanceRowLike | undefined };
+  /**
+   * `platform_instances` reader — resolves a binding's instance to its platform,
+   * and (via `listByOrg`) finds a **declared** destination without any binding
+   * (the reliable terminus, design §3 step 2).
+   */
+  instanceRepo?: InstanceSource;
   /** Who is the org Secretary — the owner of the global (level-3) default. */
   orgSecretaryId?: () => string | undefined;
-  /** Legacy platform notify channel, the global default's last resort. */
-  legacyNotifyTarget?: (orgId: string) => NotifyTarget | undefined;
+  /**
+   * Manifest field definitions per platform — the `notifyTarget` annotation
+   * source for a **declared** destination. Defaults to the platform registry;
+   * injectable so the DB→outbound path is testable without the real manifest.
+   */
+  fieldDefs?: (platform: string) => PlatformField[];
   /** HITL notification source (`HITLService`). */
   notificationSource?: NotificationSource;
   /** EventBus — task events are forwarded when present. */
@@ -43,6 +61,12 @@ export interface OutboundWiringOptions {
   digestInfo?: boolean;
   /** Secret for signing approval action refs. */
   actionSecret?: string;
+  /**
+   * Resolve an agent's display name from its id — lets a delivered notification
+   * name the agent that sent it (`agentId` → "来自 Agent 名"). Optional; without
+   * it, notifications are delivered unattributed rather than with a raw id.
+   */
+  agentName?: (agentId: string) => string | undefined;
 }
 
 export interface OutboundWiring {
@@ -63,11 +87,14 @@ export function setupOutboundDispatch(opts: OutboundWiringOptions): OutboundWiri
   }
   const orgId = opts.orgId ?? 'default';
 
+  // Every destination is resolved from the DB — `channel_bindings` plus the
+  // `platform_instances.config` that Settings writes. No `markus.json` reader
+  // here (design §3 "Single source of truth").
   const lookup = new RepoNotifyTargetLookup({
     bindingRepo: opts.bindingRepo,
     instanceRepo: opts.instanceRepo,
     orgSecretaryId: opts.orgSecretaryId,
-    fallback: opts.legacyNotifyTarget,
+    fieldDefs: opts.fieldDefs,
   });
 
   const sink = new RouterOutboundSink({
@@ -77,9 +104,14 @@ export function setupOutboundDispatch(opts: OutboundWiringOptions): OutboundWiri
     capabilitiesOf: (platform) => renderCapabilitiesOf(getManifest(platform)?.capabilities),
   });
 
+  // Preference enforcement reads the *same* `platform_instances` source the
+  // lookup resolves destinations from — one config source for both (design §3).
+  const preferences = new RepoNotifyPreferenceSource({ instanceRepo: opts.instanceRepo });
+
   const dispatcher = new OutboundDispatcher({
     lookup,
     sink,
+    preferences,
     orgId,
     digestInfo: opts.digestInfo,
     actionSecret: opts.actionSecret,

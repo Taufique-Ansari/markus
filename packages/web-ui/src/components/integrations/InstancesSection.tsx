@@ -31,6 +31,7 @@ import {
 import { type AgentOption } from './AgentSelect.tsx';
 import { InstanceCard, defaultInstanceClient, type InstanceClient } from './InstanceCard.tsx';
 import { PlatformIcon } from './PlatformIcon.tsx';
+import { PLATFORM_EXTRAS } from './platformExtras.tsx';
 
 export interface InstancesSectionProps {
   /** Platform catalog (drives the groups). Defaults to GET /settings/integrations. */
@@ -60,7 +61,7 @@ export function InstancesSection({
   loadPlatforms = defaultLoadPlatforms,
   loadInstances = defaultLoadInstances,
   client = defaultInstanceClient,
-  extras,
+  extras = PLATFORM_EXTRAS,
   loadAgents,
   defaultExpanded = false,
 }: InstancesSectionProps) {
@@ -75,6 +76,10 @@ export function InstancesSection({
   // that happens nothing exists server-side, which is why an abandoned draft
   // costs nothing and leaves no half-configured bot behind.
   const [adding, setAdding] = useState<string | null>(null);
+  // The bot a panel just created server-side (the Feishu scan-to-create flow).
+  // Its card opens expanded so the user lands on the remaining step — which
+  // agent answers — instead of a collapsed row in a list they have to find.
+  const [freshlyCreated, setFreshlyCreated] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     const [nextInstances, nextPlatforms] = await Promise.all([loadInstances(), loadPlatforms()]);
@@ -194,7 +199,10 @@ export function InstancesSection({
                 extras={extras}
                 loadAgents={loadAgents}
                 onChanged={reload}
-                onCreated={() => setAdding(null)}
+                onCreated={(id) => {
+                  setAdding(null);
+                  setFreshlyCreated(id);
+                }}
                 defaultExpanded
               />
             )}
@@ -207,7 +215,7 @@ export function InstancesSection({
                 extras={extras}
                 loadAgents={loadAgents}
                 onChanged={reload}
-                defaultExpanded={defaultExpanded}
+                defaultExpanded={defaultExpanded || instance.id === freshlyCreated}
               />
             ))}
 

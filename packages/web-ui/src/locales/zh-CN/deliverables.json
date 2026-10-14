@@ -45,6 +45,15 @@
   },
   "expandAll": "▶ 展开",
   "collapseAll": "▼ 折叠",
+  "expandAllTooltip": "展开全部",
+  "collapseAllTooltip": "折叠全部",
+  "flaggedOutdated": "已标记为过时",
+  "removed": "已移除",
+  "artifactTypes": {
+    "agent": "智能体",
+    "skill": "技能",
+    "team": "团队"
+  },
   "empty": {
     "title": "暂无交付物",
     "subtitle": "交付物由智能体在完成任务后自动创建，无需手动添加",
@@ -56,6 +65,7 @@
     "selectToView": "请选择交付物以查看详情",
     "keyboardHint": "使用 \u2191\u2193 方向键导航，\u2318F 搜索",
     "details": "详情",
+    "builderWithType": "构建器 {{type}}",
     "verify": "验证",
     "flagOutdated": "标记为已过时",
     "flagging": "正在标记…",

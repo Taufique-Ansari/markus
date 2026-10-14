@@ -1963,12 +1963,12 @@ export const api = {
     // Feishu *extensions* that have no generic equivalent (issue #340). The
     // generic credential read/write lives on the manifest endpoints below;
     // these three are the extras the generic form cannot express.
-    sendFeishuTestMessage: (data: { chatId: string }) =>
+    sendFeishuTestMessage: (data: { chatId: string; instanceId?: string }) =>
       request<{ success: boolean; message?: string }>('/settings/integrations/feishu/test-message', { method: 'POST', body: JSON.stringify(data) }),
     listFeishuChats: () =>
       request<{ chats: Array<{ chatId: string; name: string; description?: string; avatar?: string }>; error?: string }>('/settings/integrations/feishu/chats'),
-    registerFeishuApp: () =>
-      request<{ success: boolean; appId?: string; connected?: boolean; userInfo?: { open_id?: string; tenant_brand?: string }; error?: string; message?: string }>('/settings/integrations/feishu/register', { method: 'POST' }),
+    registerFeishuApp: (data?: { label?: string; agentId?: string }) =>
+      request<{ success: boolean; appId?: string; instanceId?: string; connected?: boolean; userInfo?: { open_id?: string; tenant_brand?: string }; error?: string; message?: string }>('/settings/integrations/feishu/register', { method: 'POST', body: JSON.stringify(data ?? {}) }),
     getFeishuRegisterStatus: () =>
       request<{ active: boolean; url?: string; expireIn?: number; status?: string; elapsed?: number }>('/settings/integrations/feishu/register/status'),
     // ── Generic, platform-manifest driven integrations (issue #340) ──────────

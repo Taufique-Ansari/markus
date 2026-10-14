@@ -40,6 +40,17 @@
   --color-switch-off: oklch(0.34 0.008 270);
   --color-switch-knob: oklch(0.99 0 0);
 
+  /* Selected / active control states — chips, segmented options, pills.
+     Same reasoning as the switch tokens above: the "on" look of a chip must
+     resolve from the active theme, not from `brand-600`. In the dark palette
+     `brand-600` is `oklch(0.52 0.04 250)` — chroma 0.04, i.e. grey — so a
+     selected chip and an unselected one were both mid greys and the selection
+     was invisible in dark mode. One token per theme keeps them distinguishable
+     everywhere (dark, light, system, cyberpunk, mono). */
+  --color-selected-bg: oklch(0.30 0.06 258);
+  --color-selected-border: oklch(0.46 0.11 258);
+  --color-selected-fg: oklch(0.84 0.09 250);
+
   --font-sans: 'SF Pro Display', 'SF Pro Text', 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
 }
 
@@ -67,6 +78,9 @@ html.light {
   --color-switch-on: oklch(0.55 0.20 265);
   --color-switch-off: oklch(0.85 0.004 270);
   --color-switch-knob: oklch(1 0 0);
+  --color-selected-bg: oklch(0.95 0.035 265);
+  --color-selected-border: oklch(0.80 0.09 265);
+  --color-selected-fg: oklch(0.42 0.19 268);
 }
 
 @media (prefers-color-scheme: light) {
@@ -90,6 +104,9 @@ html.light {
     --color-switch-on: oklch(0.55 0.20 265);
     --color-switch-off: oklch(0.85 0.004 270);
     --color-switch-knob: oklch(1 0 0);
+    --color-selected-bg: oklch(0.95 0.035 265);
+    --color-selected-border: oklch(0.80 0.09 265);
+    --color-selected-fg: oklch(0.42 0.19 268);
   }
 }
 
@@ -120,6 +137,9 @@ html.cyberpunk {
   --color-switch-on: oklch(0.62 0.28 330);
   --color-switch-off: oklch(0.28 0.03 320);
   --color-switch-knob: oklch(0.98 0 0);
+  --color-selected-bg: oklch(0.25 0.08 330);
+  --color-selected-border: oklch(0.48 0.16 330);
+  --color-selected-fg: oklch(0.86 0.14 330);
 }
 
 html.mono {
@@ -151,6 +171,9 @@ html.mono {
   --color-switch-on: oklch(1 0 0);
   --color-switch-off: oklch(0.35 0 0);
   --color-switch-knob: oklch(0 0 0);
+  --color-selected-bg: oklch(0.25 0 0);
+  --color-selected-border: oklch(0.72 0 0);
+  --color-selected-fg: oklch(1 0 0);
 }
 html.mono .btn-primary,
 html.mono .bg-brand-600,

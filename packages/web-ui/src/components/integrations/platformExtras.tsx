@@ -5,22 +5,26 @@
  * render function. The extras slot therefore lives here, keyed by platform id:
  * a platform with an entry gets its extra panel, a platform without one gets
  * the plain generic card and nothing else.
- *
- * `ownedFields` keeps the "one writer per field" rule intact: a field listed
- * here is rendered by the platform's own panel (e.g. a chat picker instead of a
- * free-text box), so the generic form omits it.
  */
 import type { PlatformExtras } from '../../lib/platformIntegrations.ts';
-import { FeishuExtras } from './FeishuExtras.tsx';
+import { FeishuExtras, FeishuTestMessage } from './FeishuExtras.tsx';
 
 export const PLATFORM_EXTRAS: Record<string, PlatformExtras> = {
   feishu: {
-    // The notification-forwarding knobs are rendered together as one panel with
-    // the chat picker, rather than scattered through the generic form.
-    ownedFields: ['notifyChatId', 'notifyOnApproval', 'notifyOnNotification', 'notifyPriority'],
-    // Lift the panel above the generic form: its scan-to-create QR is the
-    // recommended first path and must be seen before the manual credentials.
+    // This panel is only what a plain manifest form cannot express: the
+    // scan-to-create QR. The notification destination and its preference knobs
+    // are rendered by the generic `NotificationPanel`, for every platform, from
+    // the manifest annotation — so this entry deliberately owns no field.
     placement: 'before',
+    // Feishu can create + configure its own app from a QR scan, so hand-typing
+    // an app id + secret is the *fallback*, not a second step. The card turns
+    // these into a either/or chooser (see `guidedSetup`): the scan panel and the
+    // credential inputs are never on screen together.
+    guidedSetup: { credentialFields: ['appId', 'appSecret'] },
     render: (ctx) => <FeishuExtras ctx={ctx} />,
+    // Feishu is currently the one platform whose backend exposes a real
+    // test-send endpoint. The generic panel renders this control where a
+    // platform opts in; it is data here, never a branch inside the panel.
+    sendTest: (ctx) => <FeishuTestMessage ctx={ctx} />,
   },
 };

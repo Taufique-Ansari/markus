@@ -76,6 +76,12 @@ export interface InstanceStatus {
   /** False when the platform manifest has no way to enumerate its conversations. */
   canListChannels: boolean;
   /**
+   * Guidance copy (an i18n key) for platforms whose API cannot enumerate
+   * conversations — lets the picker say *what to do* instead of a bare
+   * "unsupported". `null` when the platform can enumerate.
+   */
+  channelsGuidance?: string | null;
+  /**
    * When this bot last passed the two-leg handshake, or `null` if never.
    *
    * Persisted (unlike the transient run) because "did this ever work?" is a
@@ -96,6 +102,8 @@ export interface InstanceChannelsResponse {
   channels: PlatformChannel[];
   /** A listing that failed does not fail the page — it is reported here. */
   error?: string;
+  /** Guidance copy (i18n key) when `supported` is false. See `canListChannels`. */
+  guidance?: string | null;
 }
 
 // ─── Connection verification (two-leg handshake) ─────────────────────────────
@@ -181,6 +189,15 @@ export function connectionState(
  * Creating a bot deliberately does **not** happen up front: the user is asked
  * for nothing until they have seen how, and the first save (which needs a name)
  * is what actually creates the row. Until then this is a draft with no id.
+ *
+ * The draft reports **no stored secrets of its own** — see `noStoredSecrets`.
+ * It must not inherit the *platform* catalog's secret presence: that flag is a
+ * fact about the platform (and on any install that has ever held an app it is
+ * `true`, sourced from the legacy config-file bootstrap), not about this
+ * not-yet-existing bot. Copying it hid the recommended one-click "scan to
+ * create" panel — the panel only appears before credentials exist — and let a
+ * required secret count as already satisfied, so a bot could be created with no
+ * secret at all.
  */
 export function draftInstance(platform: PlatformStatus): InstanceStatus {
   return {
@@ -193,7 +210,7 @@ export function draftInstance(platform: PlatformStatus): InstanceStatus {
     capabilities: platform.capabilities,
     fields: platform.fields,
     values: {},
-    secrets: platform.secrets ?? {},
+    secrets: noStoredSecrets(platform.fields),
     agentId: null,
     notifyAgentId: null,
     channels: [],
@@ -201,6 +218,23 @@ export function draftInstance(platform: PlatformStatus): InstanceStatus {
     canListChannels: false,
     lastVerifiedAt: null,
   };
+}
+
+/**
+ * The secret-presence map for a bot that has stored nothing: one `hasValue:
+ * false` entry per declared secret field.
+ *
+ * Same shape the server derives for an instance (`buildInstanceStatus`), so a
+ * client can render "not set" without guessing from the manifest — the point is
+ * that a fresh instance's answer comes from its *own* (empty) config, never
+ * from the platform-level catalogue it happened to be created alongside.
+ */
+export function noStoredSecrets(fields: PlatformField[]): Record<string, PlatformSecretState> {
+  const secrets: Record<string, PlatformSecretState> = {};
+  for (const field of fields) {
+    if (field.secret) secrets[field.key] = { hasValue: false };
+  }
+  return secrets;
 }
 
 /** True while the card has no server row yet (the "Add bot" draft). */

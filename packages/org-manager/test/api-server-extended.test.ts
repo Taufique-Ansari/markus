@@ -1118,6 +1118,7 @@ describe('APIServer extended route coverage', () => {
     it('POST /api/approvals/:id rejects unauthorized responder', async () => {
       ctx.server.setHITLService({
         onNotification: vi.fn(),
+        onApprovalChanged: vi.fn(),
         listApprovals: vi.fn(() => []),
         requestApproval: vi.fn(),
         getApproval: vi.fn(() => ({
@@ -1186,6 +1187,7 @@ describe('APIServer extended route coverage', () => {
     it('POST /api/settings/integrations/feishu/register completes QR flow', async () => {
       ctx.server.setHITLService({
         onNotification: vi.fn(),
+        onApprovalChanged: vi.fn(),
         listApprovals: vi.fn(() => [{ id: 'a1', title: 'Approve X', agentName: 'Agent A' }]),
         requestApproval: vi.fn(),
         getApproval: vi.fn(),
@@ -1209,6 +1211,15 @@ describe('APIServer extended route coverage', () => {
         return Boolean(patch?.integrations?.feishu?.appId);
       });
       expect(wroteFeishuCreds).toBe(false);
+
+      // …and it must NOT write the *legacy platform row* either. That row is
+      // what the instance-based Settings page never renders, so writing only it
+      // is precisely the defect where a successful scan showed a toast and an
+      // empty list. The bot now goes to `platformInstanceRepo` (absent in this
+      // harness, so the call is a graceful no-op — the point here is the row
+      // that must stay untouched).
+      expect(vi.mocked(ctx.storage.integrationRepo.create)).not.toHaveBeenCalled();
+      expect(vi.mocked(ctx.storage.integrationRepo.update)).not.toHaveBeenCalled();
     });
 
     it('POST /api/channels/agent/:id/messages routes to agent', async () => {
@@ -1548,6 +1559,7 @@ describe('APIServer extended route coverage', () => {
     it('POST /api/settings/integrations/feishu/register zh welcome with pending items', async () => {
       ctx.server.setHITLService({
         onNotification: vi.fn(),
+        onApprovalChanged: vi.fn(),
         listApprovals: vi.fn(() => [{ id: 'a1', title: '审批事项', agentName: 'Agent A' }]),
         requestApproval: vi.fn(),
         getApproval: vi.fn(),

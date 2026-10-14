@@ -15,10 +15,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import i18n from '../src/i18n/index.ts';
-import type { PlatformStatus } from '../src/lib/platformIntegrations.ts';
+import type { PlatformExtras, PlatformStatus } from '../src/lib/platformIntegrations.ts';
 import {
   bindingFor,
   buildRoutingPayload,
+  draftInstance,
   filterChannels,
   groupByPlatform,
   instanceAsPlatform,
@@ -361,6 +362,10 @@ describe('InstancesSection — a second bot on the same platform', () => {
     const draft = await screen.findByTestId('instance-card-new-feishu');
     expect(calls.some((c) => c.op === 'create')).toBe(false);
 
+    // A fresh bot opens on the *guided* (scan) method; this test drives the
+    // manual one, so switch to it — the two are alternatives, never together.
+    await user.click(within(draft).getByTestId('setup-method-manual-new-feishu'));
+
     await user.type(within(draft).getByTestId('new-bot-name-feishu'), 'Sales');
     // A name alone is not a bot: the platform's required fields must be there.
     expect(within(draft).getByTestId('instance-missing-new-feishu')).toBeTruthy();
@@ -389,6 +394,10 @@ describe('InstancesSection — a second bot on the same platform', () => {
     );
     await user.click(await screen.findByTestId('add-bot-feishu'));
     const draft = await screen.findByTestId('instance-card-new-feishu');
+
+    // The "incomplete bot" guard belongs to the manual path — a fresh bot opens
+    // on the guided (scan) method, where the scan (not autosave) creates it.
+    await user.click(within(draft).getByTestId('setup-method-manual-new-feishu'));
 
     // Nameless and credential-less: the hint names exactly what is missing…
     expect(within(draft).getByTestId('instance-missing-new-feishu')).toBeTruthy();
@@ -527,7 +536,8 @@ describe('InstanceCard — routing', () => {
 // packages/org-manager/test/instance-integrations.test.ts.
 
 describe('InstanceCard — setup steps follow `hasConfig`', () => {
-  it('opens the setup steps for a bot nothing has been stored for', async () => {
+  it('shows the manual steps only on the manual path (a scan needs none of them)', async () => {
+    const user = userEvent.setup();
     const { client } = clientStub();
     // What the server returns for a freshly created bot: the default agent is
     // *read through* (so `agentId` is set) while nothing is stored, so
@@ -558,14 +568,18 @@ describe('InstanceCard — setup steps follow `hasConfig`', () => {
     // The recommended first path (scan a QR to create + configure the app) is
     // reachable — this is exactly what the routing default must not hide.
     expect(await screen.findByTestId('feishu-register')).toBeTruthy();
-    // Nothing stored yet ⇒ the guidance is open, because the user needs it.
+    // The scan performs all six manual steps for you, so the manual guide is not
+    // shown on this path: it would be a tutorial for work the user is not doing.
+    expect(screen.queryByTestId('integration-guide')).toBeNull();
+    // …and it appears the moment the user chooses to type credentials by hand.
+    await user.click(screen.getByTestId('setup-method-manual-bi_fs_new'));
     expect(screen.getByTestId('integration-guide').getAttribute('data-open')).toBe('true');
     // And a bot that exists can always be removed — hiding that on an
     // unconfigured bot left no way to get rid of it at all.
     expect(screen.getByTestId('instance-disconnect-bi_fs_new')).toBeTruthy();
   });
 
-  it('collapses the setup steps once credentials are stored', async () => {
+  it('drops the setup steps and the scan/manual chooser once credentials are stored', async () => {
     const { client } = clientStub();
     const configured = instance({
       id: 'bi_fs_ready',
@@ -589,8 +603,12 @@ describe('InstanceCard — setup steps follow `hasConfig`', () => {
       />,
     );
 
-    // A returning user does not have to scroll past a tutorial they finished.
-    expect((await screen.findByTestId('integration-guide')).getAttribute('data-open')).toBe('false');
+    // A returning user does not have to scroll past a tutorial they finished —
+    // and once the bot is configured neither the guide nor the scan/manual
+    // chooser is shown at all (a configured bot cannot be "scan-created").
+    await screen.findByTestId('instance-card-bi_fs_ready');
+    expect(screen.queryByTestId('integration-guide')).toBeNull();
+    expect(screen.queryByTestId('setup-method-guided-bi_fs_ready')).toBeNull();
     expect(screen.getByTestId('instance-disconnect-bi_fs_ready')).toBeTruthy();
   });
 });
@@ -632,9 +650,62 @@ describe('InstanceCard — auto-save, header switch, verified state', () => {
     // The control the user used to have to find does not exist any more.
     expect(within(card).queryByRole('button', { name: /save/i })).toBeNull();
 
+    // A configured bot folds its credential inputs away; open the fold to edit.
+    const editToggle = within(card).queryByTestId(/^instance-credentials-edit-/);
+    if (editToggle) await user.click(editToggle);
     await user.type(within(card).getByTestId('integration-field-appId'), 'X');
     await waitFor(() => expect(calls.some((c) => c.op === 'save')).toBe(true), { timeout: 5000 });
     expect(calls.find((c) => c.op === 'save')?.payload).toMatchObject({ appId: 'cli_abcX' });
+  });
+
+  it('folds the credential inputs away once they resolve, and reveals them on demand', async () => {
+    const user = userEvent.setup();
+    const { client } = clientStub();
+    renderOne(client);
+    const card = await screen.findByTestId('instance-card-bi_fs_ready');
+
+    // The scan already filled these in — a user who just connected a bot did
+    // not come here to retype the app secret, so the inputs fold away.
+    expect(within(card).queryByTestId('integration-field-appId')).toBeNull();
+    expect(within(card).getByTestId('instance-credentials-configured-bi_fs_ready')).toBeTruthy();
+
+    // …and they are one click away when the user does need to change them.
+    await user.click(within(card).getByTestId('instance-credentials-edit-bi_fs_ready'));
+    expect(within(card).getByTestId('integration-field-appId')).toBeTruthy();
+  });
+
+  it('closes the new-bot draft when its panel reports the bot was created', async () => {
+    const user = userEvent.setup();
+    const { client } = clientStub();
+    // A stand-in for Feishu's scan-to-create flow: the panel creates the bot
+    // server-side and reports the new id through `ctx.onCreated`. Before this,
+    // a successful scan left the draft lying open next to the bot it made — as
+    // if nothing had happened.
+    const extras: Record<string, PlatformExtras> = {
+      feishu: {
+        render: (ctx) => (
+          <button data-testid="fake-create" onClick={() => ctx.onCreated?.('bi_created')}>
+            create
+          </button>
+        ),
+      },
+    };
+    render(
+      <InstancesSection
+        loadPlatforms={() => Promise.resolve([FEISHU_PLATFORM])}
+        loadInstances={() => Promise.resolve([])}
+        client={client}
+        extras={extras}
+        loadAgents={loadAgents}
+        defaultExpanded
+      />,
+    );
+
+    await user.click(await screen.findByTestId('add-bot-feishu'));
+    const draft = await screen.findByTestId('instance-card-new-feishu');
+    await user.click(within(draft).getByTestId('fake-create'));
+
+    await waitFor(() => expect(screen.queryByTestId('instance-card-new-feishu')).toBeNull());
   });
 
   it('turns the bot on and off from the switch beside the status', async () => {
@@ -685,5 +756,176 @@ describe('InstanceCard — auto-save, header switch, verified state', () => {
     await waitFor(() => expect(calls.some((c) => c.op === 'remove')).toBe(true));
     // The card leaves the page, rather than lingering as "disconnected".
     await waitFor(() => expect(screen.queryByTestId('instance-card-bi_fs_ready')).toBeNull());
+  });
+});
+
+// ─── A new bot does not inherit the platform's stored secrets ───────────────
+//
+// The catalog (`GET /settings/integrations`) reports secret *presence* for the
+// platform as a whole — and on an install that has ever held a Feishu app that
+// presence is `true`, sourced from the legacy `markus.json` bootstrap. A
+// freshly-drafted bot has no credentials of its own, so it must not read that
+// platform-level flag as its own: doing so suppressed the one-click
+// "scan to create" panel (the recommended first path) and let the required
+// secret count as already satisfied. These pin the instance-level truth.
+
+describe('a draft bot reports its own (empty) secret state', () => {
+  it('does not inherit the platform catalog’s secret presence', () => {
+    const draft = draftInstance({
+      ...FEISHU_PLATFORM,
+      hasConfig: true,
+      values: { appId: 'cli_existing' },
+      secrets: { appSecret: { hasValue: true } },
+    });
+
+    // No id, nothing stored, and — decisively — no secret yet.
+    expect(draft.id).toBe('');
+    expect(draft.hasConfig).toBe(false);
+    expect(draft.secrets).toEqual({ appSecret: { hasValue: false } });
+  });
+
+  it('offers the scan-to-create panel for a new bot even when the catalog carries a secret', async () => {
+    const user = userEvent.setup();
+    const { client } = clientStub();
+    render(
+      <InstancesSection
+        loadPlatforms={() => Promise.resolve([FEISHU_PLATFORM])}
+        loadInstances={() => Promise.resolve([
+          instance({ id: 'bi_fs_default', platform: 'feishu', label: 'Default', fields: FEISHU_PLATFORM.fields }),
+        ])}
+        client={client}
+        extras={PLATFORM_EXTRAS}
+        loadAgents={loadAgents}
+      />,
+    );
+
+    await user.click(await screen.findByTestId('add-bot-feishu'));
+    const draft = await screen.findByTestId('instance-card-new-feishu');
+
+    // The recommended first path must be reachable — this is the control the
+    // user reported missing when the catalog already had a Feishu app.
+    expect(within(draft).getByTestId('feishu-register')).toBeTruthy();
+    expect(within(draft).getByTestId('feishu-register-start')).toBeTruthy();
+  });
+});
+
+// ─── The extras registry must be wired by the SECTION, not the caller ────────
+//
+// Every other test here passes `extras={PLATFORM_EXTRAS}` itself, which is
+// exactly how the production break hid: the registry can be complete and every
+// test green while the real page — `Settings.tsx` renders `<InstancesSection />`
+// with no props — mounts a section whose `extras` is `undefined`, so NO platform
+// ever gets its panel. The scan-to-create control was dead code in the app while
+// the suite stayed green. These render the section the way the page does.
+
+describe('InstancesSection — the platform extras registry is wired by default', () => {
+  it('mounts the Feishu one-click panel without the caller passing `extras`', async () => {
+    const user = userEvent.setup();
+    const { client } = clientStub();
+    render(
+      <InstancesSection
+        loadPlatforms={() => Promise.resolve([FEISHU_PLATFORM])}
+        loadInstances={() => Promise.resolve([])}
+        client={client}
+        loadAgents={loadAgents}
+      />,
+    );
+
+    await user.click(await screen.findByTestId('add-bot-feishu'));
+    const draft = await screen.findByTestId('instance-card-new-feishu');
+
+    // The panel is rendered *only* through the extras registry; if the section
+    // does not default it to the built-in one, the whole control disappears
+    // from the product — the bug the user hit on the real page.
+    expect(within(draft).getByTestId('feishu-extras')).toBeTruthy();
+    expect(within(draft).getByTestId('feishu-register-start')).toBeTruthy();
+  });
+
+  it('still renders the plain card for a platform with no registered extras', async () => {
+    const user = userEvent.setup();
+    const { client } = clientStub();
+    render(
+      <InstancesSection
+        loadPlatforms={() => Promise.resolve([MATTERMOST])}
+        loadInstances={() => Promise.resolve([])}
+        client={client}
+        loadAgents={loadAgents}
+      />,
+    );
+
+    await user.click(await screen.findByTestId('add-bot-mattermost'));
+    await screen.findByTestId('instance-card-new-mattermost');
+    // No registry entry → no panel, and no crash from the default being set.
+    expect(screen.queryByTestId('feishu-extras')).toBeNull();
+  });
+});
+
+// ─── Guided scan and manual credentials are an either/or ────────────────────
+//
+// The reported defect: a new Feishu bot showed the "scan to create" panel *and*
+// the App ID / App Secret inputs at once — two ways to do one thing, with no
+// sign which to use. They are alternatives now: the card shows a method chooser
+// and mounts exactly one of them.
+
+describe('InstanceCard — guided setup and manual credentials are mutually exclusive', () => {
+  function renderFreshDraft() {
+    const { client } = clientStub();
+    render(
+      <InstancesSection
+        loadPlatforms={() => Promise.resolve([FEISHU_PLATFORM])}
+        loadInstances={() => Promise.resolve([])}
+        client={client}
+        extras={PLATFORM_EXTRAS}
+        loadAgents={loadAgents}
+        defaultExpanded
+      />,
+    );
+  }
+
+  it('opens a new Feishu bot on the guided method — the credential inputs are not shown', async () => {
+    const user = userEvent.setup();
+    renderFreshDraft();
+    await user.click(await screen.findByTestId('add-bot-feishu'));
+    const draft = await screen.findByTestId('instance-card-new-feishu');
+
+    // The scan is the recommended first path…
+    expect(within(draft).getByTestId('feishu-register')).toBeTruthy();
+    // …and the manual inputs it replaces are NOT on screen with it.
+    expect(within(draft).queryByTestId('integration-field-appId')).toBeNull();
+    expect(within(draft).queryByTestId('integration-field-appSecret')).toBeNull();
+  });
+
+  it('swaps to the manual inputs when that method is chosen — the scan panel goes away', async () => {
+    const user = userEvent.setup();
+    renderFreshDraft();
+    await user.click(await screen.findByTestId('add-bot-feishu'));
+    const draft = await screen.findByTestId('instance-card-new-feishu');
+
+    await user.click(within(draft).getByTestId('setup-method-manual-new-feishu'));
+
+    expect(within(draft).getByTestId('integration-field-appId')).toBeTruthy();
+    expect(within(draft).getByTestId('integration-field-appSecret')).toBeTruthy();
+    // The two are never on screen together.
+    expect(within(draft).queryByTestId('feishu-register')).toBeNull();
+  });
+
+  it('keeps a platform without a guided method on the plain manual form', async () => {
+    const user = userEvent.setup();
+    const { client } = clientStub();
+    render(
+      <InstancesSection
+        loadPlatforms={() => Promise.resolve([MATTERMOST])}
+        loadInstances={() => Promise.resolve([])}
+        client={client}
+        loadAgents={loadAgents}
+        defaultExpanded
+      />,
+    );
+    await user.click(await screen.findByTestId('add-bot-mattermost'));
+    const draft = await screen.findByTestId('instance-card-new-mattermost');
+
+    // No chooser, no guided panel: the credential inputs are simply present.
+    expect(within(draft).queryByTestId(/^setup-method-/)).toBeNull();
+    expect(within(draft).getByTestId('integration-field-serverUrl')).toBeTruthy();
   });
 });

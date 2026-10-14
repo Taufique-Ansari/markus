@@ -113,6 +113,68 @@ describe('SlackAdapter', () => {
     expect(id).toBe('1234.5679');
   });
 
+  it("sendMessage builds a Block Kit card (header + body + buttons) when format is 'card'", async () => {
+    const client = (adapter as Record<string, unknown>)['client'] as ReturnType<typeof makeMockSlackClient>;
+    const id = await adapter.sendMessage('C123', 'plain projection', {
+      format: 'card',
+      markdown: true,
+      card: {
+        title: '审批请求',
+        body: '请批准部署',
+        actions: [
+          { id: 'approve', label: '批准', style: 'primary', ref: 'signed.ref.1' },
+          { id: 'reject', label: '驳回', style: 'danger', ref: 'signed.ref.2' },
+        ],
+      },
+    });
+
+    expect(id).toBe('1234.5679');
+    // The card took the blocks path — not a text fallback.
+    expect(client.sendTextMessage).not.toHaveBeenCalled();
+    const [channel, blocks] = client.sendBlocksMessage.mock.calls[0] as [string, Array<Record<string, unknown>>, string];
+    expect(channel).toBe('C123');
+    expect(blocks[0]).toMatchObject({ type: 'header', text: { text: '审批请求' } });
+    const actionRow = blocks.find((b) => b['type'] === 'actions') as { elements: Array<Record<string, unknown>> };
+    // Buttons carry the signed ref as their value; the approval id is not present.
+    expect(actionRow.elements.map((e) => e['value'])).toEqual(['signed.ref.1', 'signed.ref.2']);
+    expect(JSON.stringify(blocks)).not.toContain('apr_');
+  });
+
+  it('sendMessage stays on the text path when format is not card', async () => {
+    const client = (adapter as Record<string, unknown>)['client'] as ReturnType<typeof makeMockSlackClient>;
+    await adapter.sendMessage('C123', 'Hello', { format: 'markdown', markdown: true });
+    expect(client.sendBlocksMessage).not.toHaveBeenCalled();
+    expect(client.sendTextMessage).toHaveBeenCalled();
+  });
+
+  it('routes a Block Kit button tap to the action port with the signed ref intact', async () => {
+    const received: unknown[] = [];
+    adapter.onAction(async (action) => {
+      received.push(action);
+    });
+
+    await (adapter as unknown as { processInteractive(p: Record<string, unknown>): Promise<void> }).processInteractive({
+      type: 'block_actions',
+      user: { id: 'U_ALICE' },
+      actions: [{ action_id: 'approve', value: 'signed.ref.9' }],
+    });
+
+    expect(received).toHaveLength(1);
+    const action = received[0] as { platform: string; actorId?: string; payload: { value: { ref: string; action?: string } } };
+    expect(action.platform).toBe('slack');
+    expect(action.actorId).toBe('U_ALICE');
+    expect(action.payload.value).toEqual({ ref: 'signed.ref.9', action: 'approve' });
+  });
+
+  it('ignores a non-block_actions interactive payload', async () => {
+    const received: unknown[] = [];
+    adapter.onAction(async (a) => received.push(a));
+    await (adapter as unknown as { processInteractive(p: Record<string, unknown>): Promise<void> }).processInteractive({
+      type: 'view_submission',
+    });
+    expect(received).toHaveLength(0);
+  });
+
   it('updateMessage delegates to client', async () => {
     await adapter.updateMessage('C123', '1234.5678', 'updated');
     const client = (adapter as Record<string, unknown>)['client'] as ReturnType<typeof makeMockSlackClient>;

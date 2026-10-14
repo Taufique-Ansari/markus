@@ -1443,6 +1443,23 @@ export class APIServer {
       };
       this.ws.sendToUser(n.targetUserId, event);
     });
+    // Terminal approval transitions are a state change every client must see —
+    // not a per-person notification. Broadcasting (not sendToUser) is what lets
+    // an approval resolved from an external surface (a Feishu card tap) clear the
+    // in-app chat banner: the banner is derived from the pending list, so it must
+    // be invalidated when the list changes, whoever changed it.
+    service.onApprovalChanged(approval => {
+      this.ws.broadcast({
+        type: 'approval:resolved',
+        payload: {
+          approvalId: approval.id,
+          status: approval.status,
+          agentId: approval.agentId,
+          respondedBy: approval.respondedBy,
+        },
+        timestamp: new Date().toISOString(),
+      });
+    });
   }
 
   /**
@@ -1463,6 +1480,13 @@ export class APIServer {
   private platformConnectionState?: (platform: string) => boolean;
   private platformRuntimeSync?: (platform: string, config: Record<string, unknown>) => void | Promise<void>;
   /**
+   * Re-derive **one** bot's live adapter from its persisted row. Instance-scoped
+   * because `sync` above is platform-scoped and can only reach bots that were
+   * already connected — it cannot bring up a bot created since boot, which is
+   * exactly the "configured but dead until restart" defect.
+   */
+  private platformRuntimeSyncInstance?: (instanceId: string) => void | Promise<void>;
+  /**
    * Connection verification hooks (two-leg handshake). Supplied by the gateway
    * because only it holds live adapters; absent ⇒ the endpoint reports 501
    * rather than pretending a test ran.
@@ -1480,12 +1504,15 @@ export class APIServer {
    * Inject the messaging gateway's live hooks. `connected` answers "is this
    * platform's bot currently connected" from the router's adapters (the single
    * owner of connection state); `sync` reconnects a platform after its settings
-   * are saved. Without them the API server reports disconnected and skips
-   * reconfiguration — never a silent half-state.
+   * are saved; `syncInstance` re-derives **one** bot (register + connect, or drop
+   * it) so a bot created or saved in Settings works without a restart. Without
+   * them the API server reports disconnected and skips reconfiguration — never a
+   * silent half-state.
    */
   setPlatformRuntimeHooks(hooks: {
     connected: (platform: string) => boolean;
     sync: (platform: string, config: Record<string, unknown>) => void | Promise<void>;
+    syncInstance?: (instanceId: string) => void | Promise<void>;
     connectionTest?: {
       begin: (
         instanceId: string,
@@ -1497,12 +1524,28 @@ export class APIServer {
   }): void {
     this.platformConnectionState = hooks.connected;
     this.platformRuntimeSync = hooks.sync;
+    this.platformRuntimeSyncInstance = hooks.syncInstance;
     this.connectionTestHooks = hooks.connectionTest;
   }
 
   /** Live connection state for a platform, supplied by the messaging gateway. */
   private platformConnected(platform: string): boolean {
     return this.platformConnectionState?.(platform) ?? false;
+  }
+
+  /**
+   * Bring one bot's live adapter in line with its persisted row. Awaited by the
+   * connection test (which cannot run against a dead adapter) and fire-and-
+   * forgotten by create/save/delete (which must answer fast). Best-effort either
+   * way: with no gateway wired it is a no-op, never an error — the config is still
+   * saved, it just cannot go live.
+   */
+  private async reconcileInstanceRuntime(instanceId: string): Promise<void> {
+    try {
+      await this.platformRuntimeSyncInstance?.(instanceId);
+    } catch (error) {
+      log.warn('Runtime instance reconcile failed', { instanceId, error: String(error) });
+    }
   }
 
   /**
@@ -10278,6 +10321,29 @@ EXPLANATION_END`;
     const instancesAvailable = (): boolean =>
       !!this.storage?.platformInstanceRepo && !!this.storage?.channelBindingRepo;
 
+    /**
+     * A label that no other Feishu bot already uses — `飞书`, then `飞书 2`, …
+     *
+     * The QR flow cannot ask for a name (the user has not met the card yet), so
+     * the bot lands with a sensible default and the user renames it in the name
+     * field on the card it opens. Uniqueness is enforced against the real rows
+     * rather than the DB index, so the collision is resolved before
+     * `createInstance` would throw an opaque constraint error.
+     */
+    const uniqueFeishuLabel = (store: InstanceStoreDeps, requested: string, locale: 'zh' | 'en'): string => {
+      const base = requested.trim() || (locale === 'en' ? 'Lark' : '飞书');
+      const taken = new Set(
+        ((store.instances?.listByPlatform?.(store.orgId, 'feishu') ?? []) as Array<{ label: string }>).map(
+          (row) => row.label,
+        ),
+      );
+      if (!taken.has(base)) return base;
+      for (let n = 2; ; n += 1) {
+        const candidate = `${base} ${n}`;
+        if (!taken.has(candidate)) return candidate;
+      }
+    };
+
     const instancesMatch = /^\/api\/settings\/integrations\/instances$/.exec(path);
     const instanceMatch = /^\/api\/settings\/integrations\/instances\/([^/]+)$/.exec(path);
     const instanceTestMatch =
@@ -10326,6 +10392,10 @@ EXPLANATION_END`;
       }
       try {
         const instance = await createInstance(instanceStore(auth.orgId), { platform, label });
+        // Make the new bot live now, not at the next restart. Fire-and-forget so
+        // the response is not held hostage by a handshake; the status the UI polls
+        // reflects it a moment later.
+        void this.reconcileInstanceRuntime(instance.id);
         this.auditService?.record({
           orgId: auth.orgId,
           type: 'settings_changed',
@@ -10395,6 +10465,9 @@ EXPLANATION_END`;
           body,
           typeof body['enabled'] === 'boolean' ? body['enabled'] : undefined,
         );
+        // A saved bot goes live immediately (and a disabled one is dropped) — this
+        // is the fix for "I configured it and had to restart Markus".
+        void this.reconcileInstanceRuntime(instance.id);
         this.auditService?.record({
           orgId: auth.orgId,
           type: 'settings_changed',
@@ -10432,6 +10505,9 @@ EXPLANATION_END`;
           this.json(res, 404, { error: `Bot instance not found: "${id}"` });
           return;
         }
+        // The row is gone, so the adapter must be too — a deleted bot keeping a
+        // live socket is the same drift as one that never connects.
+        void this.reconcileInstanceRuntime(id);
         this.auditService?.record({
           orgId: auth.orgId,
           type: 'settings_changed',
@@ -10535,6 +10611,10 @@ EXPLANATION_END`;
             name: typeof body['channelName'] === 'string' ? body['channelName'] : null,
           }
         : defaultTestTarget(instance);
+      // The handshake needs a live adapter; re-derive it first so "Save & test"
+      // works on a freshly configured bot without a restart (and is a harmless
+      // no-op when the save already connected it).
+      await this.reconcileInstanceRuntime(instance.id);
       try {
         const test = await this.connectionTestHooks.begin(instance.id, instance.platform, target);
         this.auditService?.record({
@@ -10595,7 +10675,15 @@ EXPLANATION_END`;
         return;
       }
       if (!manifest.listChannels) {
-        this.json(res, 200, { supported: false, channels: [] });
+        this.json(res, 200, {
+          supported: false,
+          channels: [],
+          // Not silent: a platform that genuinely cannot enumerate carries the
+          // guidance (an i18n key) the picker shows instead of a bare
+          // "unsupported". Same manifest field as the instance DTO's
+          // `channelsGuidance`, so the two surfaces cannot disagree.
+          guidance: manifest.channelEnumerationGuidance ?? null,
+        });
         return;
       }
       try {
@@ -10827,15 +10915,32 @@ EXPLANATION_END`;
       if (!auth) return;
       const body = await this.readBody(req);
       const chatId = (body['chatId'] as string) ?? '';
+      const instanceId = typeof body['instanceId'] === 'string' ? body['instanceId'] : '';
       if (!chatId) {
         this.json(res, 400, { error: 'chatId is required' });
         return;
       }
       try {
-        // Resolved through the platform store (DB first, markus.json bootstrap)
-        const resolved = this.resolvePlatformConfig(auth.orgId, 'feishu');
-        const appId = resolved['appId'] as string | undefined;
-        const appSecret = resolved['appSecret'] as string | undefined;
+        // The bot the user is looking at sends the test — its *own* credentials,
+        // never the legacy platform row's (which, after a QR scan, belongs to a
+        // different app). Falls back to the platform store for pre-instance
+        // installs that only ever had a platform-level config.
+        let appId: string | undefined;
+        let appSecret: string | undefined;
+        if (instanceId) {
+          const row = this.storage?.platformInstanceRepo?.findById?.(instanceId) as
+            | { platform?: string; config?: Record<string, unknown> }
+            | undefined;
+          if (row && row.platform === 'feishu') {
+            appId = row.config?.['appId'] as string | undefined;
+            appSecret = row.config?.['appSecret'] as string | undefined;
+          }
+        }
+        if (!appId || !appSecret) {
+          const resolved = this.resolvePlatformConfig(auth.orgId, 'feishu');
+          appId = appId ?? (resolved['appId'] as string | undefined);
+          appSecret = appSecret ?? (resolved['appSecret'] as string | undefined);
+        }
         if (!appId || !appSecret) {
           this.json(res, 400, { error: 'Feishu integration not configured' });
           return;
@@ -10863,6 +10968,7 @@ EXPLANATION_END`;
     if (path === '/api/settings/integrations/feishu/register' && req.method === 'POST') {
       const auth = await this.requireAuth(req, res);
       if (!auth) return;
+      const body = await this.readBody(req).catch(() => ({} as Record<string, unknown>));
       try {
         const Lark = await import('@larksuiteoapi/node-sdk');
         const controller = new AbortController();
@@ -10870,12 +10976,25 @@ EXPLANATION_END`;
         // Timeout after 10 minutes
         const timeout = setTimeout(() => controller.abort(), 600_000);
 
+        // The app is created *as* the agent the user picked, so the Feishu app
+        // name (and the bot's label below) carry that agent's identity instead of
+        // a fixed "Markus 秘书" — which mislabels every bot on a multi-bot
+        // install and is exactly the "wired to the wrong agent" the guided flow
+        // is meant to prevent.
+        const requestedAgentId = typeof body['agentId'] === 'string' ? body['agentId'].trim() : '';
+        const requestedAgent = requestedAgentId
+          ? ((this.storage?.agentRepo?.findById?.(requestedAgentId) as { name?: string } | null) ?? null)
+          : null;
+        const requestedAgentName = requestedAgent?.name ?? null;
+
         const result = await Lark.registerApp({
           source: 'markus',
           signal: controller.signal,
           appPreset: {
-            name: 'Markus 秘书',
-            desc: 'Markus 智能秘书 — 消息互动、通知转发、审批处理',
+            name: requestedAgentName ?? 'Markus 秘书',
+            desc: requestedAgentName
+              ? `Markus · ${requestedAgentName} — 消息互动、通知转发、审批处理`
+              : 'Markus 智能秘书 — 消息互动、通知转发、审批处理',
           },
           onQRCodeReady: (info) => {
             // Store QR info for polling — use a simple in-memory store keyed by orgId
@@ -10895,54 +11014,56 @@ EXPLANATION_END`;
         clearTimeout(timeout);
         this.feishuRegisterSessions.delete(auth.orgId);
 
-        // Auto-save the credentials
+        // Auto-save the credentials onto a **bot instance** — the store the
+        // Settings page reads. This handler used to write only the legacy
+        // platform row (`integrations.feishu_default`), which the instance-based
+        // page never renders: a successful scan then showed only a toast, and
+        // the bot was invisible. The bot is created here through the *same*
+        // write path the manual form uses (`createInstance` + `saveInstance`),
+        // so there is exactly one writer per fact — and the page picks it up on
+        // the reload it does the moment this call returns.
         const appId = result.client_id;
         const appSecret = result.client_secret;
         const locale = result.user_info?.tenant_brand === 'lark' ? 'en' : 'zh';
-        const registeredOpenId = result.user_info?.open_id;
-        const repo = this.storage?.integrationRepo;
-        const existing = findFeishuConfig(auth.orgId);
-        const existingConfig = (existing?.['config'] as Record<string, unknown> | undefined) ?? {};
 
-        // Credentials are written into the SAME row/config as every other
-        // platform value — one writer. `markus.json` is a read-only bootstrap
-        // default now, never a write target (docs/design/…-credentials.md).
-        const payload: Record<string, unknown> = {
-          id: existing?.['id'] ?? 'feishu_default',
+        const store = instanceStore(auth.orgId);
+        const label = uniqueFeishuLabel(
+          store,
+          (typeof body['label'] === 'string' && body['label']) || requestedAgentName || '',
+          locale as 'zh' | 'en',
+        );
+        const instance = await createInstance(store, { platform: 'feishu', label });
+        // The agent that answers for this bot is chosen by the user *before* the
+        // scan (the QR panel requires it). Persisting it here is what keeps the
+        // bot from silently inheriting the org Secretary via the routing
+        // fallback chain (channel → instance → platform → global → Secretary).
+        const boundAgentId = requestedAgentId;
+        await saveInstance(store, instance.id, {
+          appId,
+          appSecret,
+          locale,
+          ...(boundAgentId ? { agentId: boundAgentId } : {}),
+          wsMode: true,
+          notifyOnApproval: true,
+          notifyOnNotification: true,
+          notifyPriority: ['normal', 'high', 'urgent'],
+        });
+        // Bring the new bot live now (register + connect its adapter) so the
+        // Settings card reports "connected" without a restart.
+        await this.reconcileInstanceRuntime(instance.id);
+
+        log.info('Feishu app registered via QR scan', {
           orgId: auth.orgId,
-          platform: 'feishu',
-          displayName: locale === 'en' ? 'Lark' : '飞书',
-          enabled: true,
-          config: {
-            ...existingConfig,
-            appId,
-            appSecret,
-            locale,
-            notifyOpenId: registeredOpenId,
-            connectionMode: 'long_connection',
-            notifyOnApproval: true,
-            notifyOnNotification: true,
-            notifyPriority: ['normal', 'high', 'urgent'],
-          },
-          forwardRules: existing?.['forwardRules'] ?? [],
-          lastVerifiedAt: new Date().toISOString(),
-          lastError: null,
-        };
-        if (repo) {
-          if (existing) {
-            await repo.update(existing['id'] as string, payload);
-          } else {
-            await repo.create(payload);
-          }
-        }
-
-        // Reconnect the platform's bots through the gateway with the fresh config.
-        void this.platformRuntimeSync?.('feishu', { appId, appSecret, locale: locale as 'zh' | 'en' });
-
-        log.info('Feishu app registered via QR scan', { orgId: auth.orgId, appId });
+          appId,
+          instanceId: instance.id,
+        });
 
         // Send welcome message and pending status to the user who scanned
         const openId = result.user_info?.open_id;
+        // Name the bot that was just created and the agent that answers for it.
+        // The card used to say "Markus 秘书" whoever you created and whatever you
+        // bound — wrong the moment one platform hosts several bots.
+        const boundAgentName = requestedAgentName ?? (boundAgentId || null);
         if (openId) {
           try {
             const { FeishuApiClient } = await import('./feishu-api-client.js');
@@ -10972,9 +11093,9 @@ EXPLANATION_END`;
               }
               const card = {
                 config: { wide_screen_mode: true },
-                header: { title: { tag: 'plain_text', content: '🎉 Markus Secretary is Online' }, template: 'green' },
+                header: { title: { tag: 'plain_text', content: `🎉 ${label} is online` }, template: 'green' },
                 elements: [
-                  { tag: 'markdown', content: `**Markus Secretary** has been connected to your Lark!\n\nYou can now:\n- 💬 Send me messages and I'll handle them for you\n- 📋 Receive system notifications and approval requests\n- ✅ Approve or reject directly in the conversation\n- 🤖 Interact with the AI team in real time${statusLines}` },
+                  { tag: 'markdown', content: `**${label}** is now connected to your Lark!${boundAgentName ? `\n\n🤖 Answered by **${boundAgentName}** — re-point it any time in Settings → Integrations.` : ''}\n\nYou can now:\n- 💬 Send me messages and I'll handle them for you\n- 📋 Receive system notifications and approval requests\n- ✅ Approve or reject directly in the conversation\n- 🤖 Interact with the AI team in real time${statusLines}` },
                   { tag: 'hr' },
                   { tag: 'note', elements: [{ tag: 'plain_text', content: 'Powered by Markus — Your AI Team OS' }] },
                 ],
@@ -10999,9 +11120,9 @@ EXPLANATION_END`;
               }
               const card = {
                 config: { wide_screen_mode: true },
-                header: { title: { tag: 'plain_text', content: '🎉 Markus 秘书已上线' }, template: 'green' },
+                header: { title: { tag: 'plain_text', content: `🎉 ${label} 已接入飞书` }, template: 'green' },
                 elements: [
-                  { tag: 'markdown', content: `**Markus 秘书** 已成功接入你的飞书！\n\n你现在可以：\n- 💬 直接发消息给我，我来帮你处理\n- 📋 接收系统通知和审批请求\n- ✅ 直接在对话中审批或驳回\n- 🤖 与 AI 团队实时互动${statusLines}` },
+                  { tag: 'markdown', content: `**${label}** 已成功接入你的飞书！${boundAgentName ? `\n\n🤖 由「${boundAgentName}」负责应答——随时可在「设置 → 集成」里更换。` : ''}\n\n你现在可以：\n- 💬 直接发消息给我，我来帮你处理\n- 📋 接收系统通知和审批请求\n- ✅ 直接在对话中审批或驳回\n- 🤖 与 AI 团队实时互动${statusLines}` },
                   { tag: 'hr' },
                   { tag: 'note', elements: [{ tag: 'plain_text', content: 'Powered by Markus — Your AI Team OS' }] },
                 ],
@@ -11017,6 +11138,9 @@ EXPLANATION_END`;
         this.json(res, 200, {
           success: true,
           appId,
+          // The id of the bot just created — the UI uses it to close the draft
+          // and open the real card, whose only remaining step is the agent.
+          instanceId: instance.id,
           connected: this.platformConnected('feishu'),
           userInfo: result.user_info,
         });

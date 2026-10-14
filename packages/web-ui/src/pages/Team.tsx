@@ -4113,6 +4113,12 @@ export function TeamPage({ initialAgentId, authUser, previewMode, previewData }:
       }, 400);
     };
     const unsubA = wsClient.on('approval:requested', scheduleRefresh);
+    // A terminal approval transition, from ANY surface — including an external
+    // IM (Feishu card tap) that never touches this client. Without this the
+    // banner above the composer would linger after the approval was already
+    // settled elsewhere; it is derived from the pending list, so it must refresh
+    // when that list changes.
+    const unsubR = wsClient.on('approval:resolved', scheduleRefresh);
     const unsubN = wsClient.on('notification', scheduleRefresh);
     // Keep the in-chat card in sync when the user responds from another surface
     // (e.g. the notification bell modal) — the resolved approval drops out of the
@@ -4122,6 +4128,7 @@ export function TeamPage({ initialAgentId, authUser, previewMode, previewData }:
     return () => {
       if (debounceTimer) clearTimeout(debounceTimer);
       unsubA();
+      unsubR();
       unsubN();
       window.removeEventListener('markus:notifications-changed', onNotifChanged);
     };

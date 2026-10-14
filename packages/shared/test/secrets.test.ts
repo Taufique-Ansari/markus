@@ -85,4 +85,37 @@ describe('secrets resolver', () => {
     const { resolveGatewaySecret, DEV_GATEWAY_SECRET } = await loadModule();
     expect(resolveGatewaySecret()).not.toBe(DEV_GATEWAY_SECRET);
   });
+
+  // ── Approval action-ref secret (auto-derived, never operator-configured) ──
+
+  it('auto-generates + persists an action secret when MARKUS_ACTION_SECRET is unset', async () => {
+    const { resolveActionSecret } = await loadModule();
+    const a = resolveActionSecret();
+    expect(a.length).toBeGreaterThanOrEqual(32);
+    const file = join(tmpHome, 'action-secret');
+    expect(existsSync(file)).toBe(true);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  it('keeps the action secret stable across calls and module reloads', async () => {
+    const { resolveActionSecret } = await loadModule();
+    const first = resolveActionSecret();
+    expect(resolveActionSecret()).toBe(first);
+
+    vi.resetModules();
+    const reloaded = await loadModule();
+    expect(reloaded.resolveActionSecret()).toBe(first);
+  });
+
+  it('honours an explicit MARKUS_ACTION_SECRET and does not touch the file store', async () => {
+    vi.stubEnv('MARKUS_ACTION_SECRET', 'operator-supplied-action-secret');
+    const { resolveActionSecret } = await loadModule();
+    expect(resolveActionSecret()).toBe('operator-supplied-action-secret');
+    expect(existsSync(join(tmpHome, 'action-secret'))).toBe(false);
+  });
+
+  it('treats MARKUS_ACTION_SECRET as a platform secret (never read from a low-trust .env)', async () => {
+    const { isSecretEnvKey } = await loadModule();
+    expect(isSecretEnvKey('MARKUS_ACTION_SECRET')).toBe(true);
+  });
 });

@@ -219,6 +219,83 @@ describe('HITLService', () => {
     });
   });
 
+  describe('req_d25dc9b9 — per-person vs per-channel stream granularity', () => {
+    beforeEach(() => {
+      // 3 human users — the machine's default org has exactly 3 (Jason/nicky/Alice).
+      service.setOrgService({
+        listHumanUsers: vi.fn(() => [
+          { id: 'u1', name: 'A' },
+          { id: 'u2', name: 'B' },
+          { id: 'u3', name: 'C' },
+        ]),
+      } as never);
+    });
+
+    it('per-person stream (`onNotification`) fires N times for targetUserId:"all"', () => {
+      const person = vi.fn();
+      service.onNotification(person);
+
+      service.notify({ targetUserId: 'all', type: 'system', title: 'T', body: 'B' });
+
+      expect(person).toHaveBeenCalledTimes(3);
+      expect(person.mock.calls.map((c) => (c[0] as { targetUserId: string }).targetUserId)).toEqual(['u1', 'u2', 'u3']);
+    });
+
+    it('channel stream (`onChannelNotification`) fires exactly once for targetUserId:"all"', () => {
+      const channel = vi.fn();
+      service.onChannelNotification(channel);
+
+      service.notify({ targetUserId: 'all', type: 'system', title: 'T', body: 'B' });
+
+      expect(channel).toHaveBeenCalledTimes(1);
+      expect(channel).toHaveBeenCalledWith(expect.objectContaining({ title: 'T', targetUserId: 'all' }));
+    });
+
+    it('the two streams are independent — N persisted rows, ONE channel event (never persisted)', () => {
+      const person = vi.fn();
+      const channel = vi.fn();
+      service.onNotification(person);
+      service.onChannelNotification(channel);
+
+      service.notify({ targetUserId: 'all', type: 'task_review', title: 'X', body: 'Y', metadata: { taskId: 't1' } });
+
+      expect(person).toHaveBeenCalledTimes(3);
+      expect(channel).toHaveBeenCalledTimes(1);
+      // Persistence is per-person only — the bell rows are the single writer; the
+      // channel event is a pure logical event and must not create a 4th row.
+      expect(notificationRepo.insert).toHaveBeenCalledTimes(3);
+      expect((channel.mock.calls[0]![0] as { metadata?: unknown }).metadata).toEqual({ taskId: 't1' });
+    });
+
+    it('a concrete target fires both streams exactly once', () => {
+      const person = vi.fn();
+      const channel = vi.fn();
+      service.onNotification(person);
+      service.onChannelNotification(channel);
+
+      service.notify({ targetUserId: 'u2', type: 'direct_message', title: 'P', body: 'B' });
+
+      expect(person).toHaveBeenCalledTimes(1);
+      expect(channel).toHaveBeenCalledTimes(1);
+    });
+
+    it('unsubscribing one stream does not affect the other', () => {
+      const person = vi.fn();
+      const channel = vi.fn();
+      const offPerson = service.onNotification(person);
+      const offChannel = service.onChannelNotification(channel);
+      offChannel();
+
+      service.notify({ targetUserId: 'all', type: 'system', title: 'T', body: 'B' });
+      expect(person).toHaveBeenCalledTimes(3);
+      expect(channel).not.toHaveBeenCalled();
+
+      offPerson();
+      service.notify({ targetUserId: 'all', type: 'system', title: 'T2', body: 'B' });
+      expect(person).toHaveBeenCalledTimes(3);
+    });
+  });
+
   describe('restoration from repo', () => {
     it('restores approvals on setApprovalRepo', () => {
       const fresh = new HITLService();

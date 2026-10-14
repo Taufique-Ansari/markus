@@ -839,7 +839,11 @@
     "configuredTip": "Feishu is configured. Set a default chat above to receive notifications.",
     "status": {
       "connected": "Connected",
-      "disconnected": "Not connected"
+      "disconnected": "Not connected",
+      "verified": "Connected",
+      "unverified": "Unverified",
+      "off": "Off",
+      "unconfigured": "Not configured"
     },
     "capability": {
       "inbound": "Receives",
@@ -852,6 +856,14 @@
     "guide": {
       "heading": "Setup guide",
       "openConsole": "Open developer console",
+      "destinationStep": {
+        "title": "Set a notification destination",
+        "desc": "Pick the chat or user that should receive approvals and notifications — without it they have nowhere to go."
+      },
+      "selectChatStep": {
+        "title": "Pick the notification group",
+        "desc": "Add the bot to a group in your IM → click “Load groups” → pick it from the list."
+      },
       "fallback": "Fill in the credentials from the platform's developer console below."
     },
     "platforms": {
@@ -875,8 +887,8 @@
         "description": "Connect Feishu to receive messages and forward notifications and approvals.",
         "guide": {
           "step1": {
-            "title": "Create a self-built app",
-            "desc": "Scan the QR code below for one-click setup, or create an app manually on the Feishu Open Platform."
+            "title": "Create a Feishu agent app",
+            "desc": "For a new bot: click “Scan QR Code to Create App” to generate the code — scanning it sets everything up in one step (bot, permissions and event subscription included). Or create an \"agent app\" on the Feishu Open Platform and enter the credentials manually."
           },
           "step2": { "title": "Enable the bot", "desc": "App → Features → Bot: turn on bot capability." },
           "step3": { "title": "Add permissions", "desc": "App → Permissions: enable im:message and im:message.receive_v1." },
@@ -891,6 +903,7 @@
           "webhookPort": { "label": "Webhook port", "help": "Port for the webhook server when WebSocket mode is off." },
           "encryptKey": { "label": "Encrypt Key", "help": "AES key for decrypting encrypted webhook payloads." },
           "verificationToken": { "label": "Verification Token", "help": "Event-subscription verification token." },
+          "notifyEnabled": { "label": "Notifications", "help": "Deliver this bot’s approvals and notifications to the destination below." },
           "notifyChatId": { "label": "Default chat", "help": "Group chat that receives notifications. Leave blank to use direct messages." },
           "notifyOpenId": { "label": "Default user", "help": "User open_id for direct (\"send to my Feishu\") messages." },
           "notifyOnApproval": { "label": "Notify on approvals", "help": "Forward approval requests to the chat / user above." },
@@ -915,11 +928,14 @@
         "fields": {
           "botToken": { "label": "Bot Token", "placeholder": "123456:ABC-DEF…", "help": "Token from @BotFather. Verified with getMe when the adapter connects." },
           "agentId": { "label": "Bound agent", "help": "Agent that answers inbound messages. Leave blank to require an explicit per-channel binding.", "placeholder": "agt_…" },
-          "apiUrl": { "label": "API URL", "help": "Override for a self-hosted Bot API server." },
+          "apiUrl": { "label": "API URL", "help": "Override for a self-hosted Bot API server.", "placeholder": "https://api.telegram.org" },
+          "notifyEnabled": { "label": "Notifications", "help": "Deliver this bot’s approvals and notifications to the destination below." },
+          "notifyChatId": { "label": "Notification chat ID", "help": "Telegram chat id (group or channel) that approvals and notifications are delivered to." },
           "pollingEnabled": { "label": "Long polling", "help": "Receive updates by polling instead of a webhook (no public URL needed)." },
           "webhookPort": { "label": "Webhook port", "help": "Local port for the webhook server. Leave blank to disable inbound webhooks." },
           "webhookSecret": { "label": "Webhook secret", "help": "Sent to Telegram as the webhook secret token and checked on each update." },
-          "webhookPath": { "label": "Webhook path" }
+          "webhookPath": { "label": "Webhook path" },
+          "webhookUrl": { "label": "Public webhook URL", "help": "Telegram requires a publicly reachable HTTPS URL to call. Only needed when long polling is off.", "placeholder": "https://example.com/webhook/telegram" }
         }
       },
       "slack": {
@@ -940,7 +956,9 @@
           "socketMode": { "label": "Socket Mode" },
           "webhookPort": { "label": "Webhook port", "help": "Local port for the webhook server. Leave blank to disable inbound webhooks." },
           "webhookPath": { "label": "Webhook path" },
-          "apiUrl": { "label": "API URL" }
+          "apiUrl": { "label": "API URL", "placeholder": "https://slack.com/api" },
+          "notifyEnabled": { "label": "Notifications", "help": "Deliver this bot’s approvals and notifications to the destination below." },
+          "notifyChannelId": { "label": "Notification channel", "help": "Slack channel id (e.g. C0123456789) that approvals and notifications are delivered to." }
         }
       },
       "whatsapp": {
@@ -953,12 +971,14 @@
           "step4": { "title": "Configure the webhook (required)", "desc": "WhatsApp has no polling: point Meta's callback URL at a publicly reachable HTTPS endpoint, set the verify token, and subscribe to the messages field. Meta Business verification is required to message real users." }
         },
         "fields": {
-          "phoneNumberId": { "label": "Phone Number ID", "help": "Meta Cloud API phone number id used as the sender." },
+          "phoneNumberId": { "label": "Phone Number ID", "help": "Meta Cloud API phone number id used as the sender.", "placeholder": "123456789012345" },
+          "notifyEnabled": { "label": "Notifications", "help": "Deliver this bot’s approvals and notifications to the destination below." },
+          "notifyWaId": { "label": "Notification WhatsApp ID", "help": "Recipient wa_id (phone number in international format) for approvals and notifications." },
           "accessToken": { "label": "Access Token", "help": "Cloud API access token. The API Setup temporary token (~24h) is fine for testing; use a permanent system-user token in production." },
           "agentId": { "label": "Bound agent", "help": "Agent that answers inbound messages. Leave blank to require an explicit per-channel binding.", "placeholder": "agt_…" },
           "businessAccountId": { "label": "Business Account ID" },
           "apiVersion": { "label": "API version", "help": "Graph API version segment appended to the base URL." },
-          "baseUrl": { "label": "Base URL" },
+          "baseUrl": { "label": "Base URL", "placeholder": "https://graph.facebook.com" },
           "webhookPort": { "label": "Webhook port", "help": "Local port for the webhook server. Leave blank to disable inbound webhooks." },
           "webhookPath": { "label": "Webhook path" },
           "webhookVerifyToken": { "label": "Webhook verify token", "help": "Echoed back during Meta's GET webhook verification handshake." },
@@ -979,7 +999,9 @@
           "botToken": { "label": "Bot Token", "help": "Bot token from the Discord developer portal." },
           "agentId": { "label": "Bound agent", "help": "Agent that answers inbound messages. Leave blank to require an explicit per-channel binding.", "placeholder": "agt_…" },
           "apiUrl": { "label": "API URL", "placeholder": "https://discord.com/api/v10" },
-          "gatewayUrl": { "label": "Gateway URL", "placeholder": "wss://gateway.discord.gg" }
+          "gatewayUrl": { "label": "Gateway URL", "placeholder": "wss://gateway.discord.gg" },
+          "notifyEnabled": { "label": "Notifications", "help": "Deliver this bot’s approvals and notifications to the destination below." },
+          "notifyChannelId": { "label": "Notification channel", "help": "Discord channel id that approvals and notifications are delivered to." }
         }
       }
     }
@@ -1015,14 +1037,17 @@
     "longConnectionNote": "Long connection mode requires an enterprise self-built app. Store apps are not supported. No public IP or domain is needed.",
     "quickSetup": "Quick Setup",
     "oneClickTitle": "One-Click Feishu Integration",
-    "oneClickDesc": "Scan a QR code with Feishu to automatically create and configure the app. No manual setup needed.",
+    "oneClickDesc": "Click “Scan QR Code to Create App” and scan it with Feishu — the app is created and configured for you, no manual setup.",
     "scanToCreate": "Scan QR Code to Create App",
+    "bindAgent": "Agent that answers for this bot",
+    "bindAgentHint": "Messages sent to this bot are answered by this agent. Pick it now so the bot is never wired to the wrong one.",
+    "bindAgentLocked": "This agent is baked into the QR — cancel the scan to change it.",
     "oneClickPermissions": "The app will be created with permissions: bot messaging, message receiving, user info reading, and group chat management.",
     "generatingQR": "Generating QR code...",
     "scanWithFeishu": "Scan with Feishu app",
     "scanHint": "Use your Feishu mobile app to scan and authorize. The app will be created in your organization.",
     "qrExpire": "QR code expires in {{minutes}} minutes",
-    "registerSuccess": "App created successfully! Integration is now active.",
+    "registerSuccess": "App created! Your bot is ready — next, choose the agent that answers for it.",
     "registerFailed": "Registration failed",
     "manualConfig": "Manual configuration (advanced)",
     "appInfo": "App Information",
@@ -1121,6 +1146,12 @@
     "modelGuidanceCodex": "Standard models shown. Custom models can be typed manually."
   },
   "instances": {
+    "setup": {
+      "title": "Connection",
+      "configuredTitle": "Bot setup",
+      "guided": "Scan to create (recommended)",
+      "manual": "Enter credentials manually"
+    },
     "subtitle": "Each bot is an instance: its own credentials, its own agent, its own chats. A platform can host several.",
     "botCount": "{{count}} bots",
     "botCount_one": "{{count}} bot",
@@ -1130,9 +1161,34 @@
     "newBot": "New bot",
     "toggleLabel": "Turn this bot on or off",
     "credentials": "Credentials",
-    "moreSettings": "More settings",
-    "moreSettingsHint": "Routing, notification target and advanced options",
+    "credentialsSet": "Credentials set",
+    "credentialsEdit": "Change",
+    "credentialsHide": "Hide",
+    "moreSettings": "Advanced",
+    "moreSettingsHint": "Chat routing and platform options",
+    "advancedTitle": "Platform options",
     "advancedHint": "These default to the right value for almost every setup — leave them alone unless you know you need them.",
+    "notify": {
+      "title": "Notifications",
+      "masterLabel": "Enable notifications",
+      "destination": "Destination",
+      "content": "What to send",
+      "configured": "Destination set — approvals and notifications will be delivered here.",
+      "notConfigured": "No destination yet — approvals and notifications have nowhere to go and will be dropped.",
+      "unsupported": "This platform does not declare a notification destination.",
+      "reachConfigured": "Configured",
+      "reachNotConfigured": "Not set",
+      "reachUnsupported": "Not supported",
+      "conversations": "Conversations",
+      "pickEmpty": "Add the bot to a group in your IM → click “Load groups” → pick it from the list.",
+      "manualInput": "Enter an ID manually",
+      "currentDestination": "Current destination",
+      "guidanceFallback": "This platform can’t list its conversations — enter the destination ID manually."
+    },
+    "channels": {
+      "refresh": "Refresh",
+      "refreshing": "Refreshing…"
+    },
     "autosave": {
       "saving": "Saving…",
       "saved": "Saved"
@@ -1147,15 +1203,22 @@
     "routing": {
       "title": "Routing",
       "hint": "Choose which agent answers in each chat, and where this bot sends notifications.",
-      "notifyTarget": "Notification target",
-      "notifyTargetHint": "Approvals and notifications about this bot are delivered here. Leave empty to use the org secretary.",
-      "chats": "Chat bindings",
+      "notifyTarget": "Notification destination",
+      "notifyTargetHint": "Set the destination in the Notifications panel above — approvals and notifications are delivered there.",
+      "notifyFallback": "Fallback: notify this agent",
+      "notifyFallbackHint": "Optional. Notifications go to the destination configured above; only when none is set are they delivered to this agent’s conversation.",
+      "chats": "Chat routing",
+      "chatsHint": "The agent bound above answers every chat by default. Route a specific chat to a different agent here.",
       "unsupported": "This platform does not let us list its chats.",
       "chatAgent": "Agent for this chat",
       "searchChats": "Search chats…",
       "autoSaved": "Changes are saved automatically.",
       "save": "Save routing",
-      "agentRequired": "Pick an agent for every selected chat ({{count}} still unassigned)."
+      "agentRequired": "Pick an agent for every selected chat ({{count}} still unassigned).",
+      "guidance": {
+        "telegram": "Telegram bots can’t list their chats — add the bot to the group, then paste the group’s chat ID here.",
+        "whatsapp": "WhatsApp doesn’t let us list your chats — enter the destination number or group ID here."
+      }
     }
   }
 }

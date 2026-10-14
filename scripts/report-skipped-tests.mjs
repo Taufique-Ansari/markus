@@ -37,6 +37,14 @@ const ALLOWLIST = new Map([
     '需要真实 provider 凭据（OPENROUTER / GEMINI 等）。CI 无密钥 → 整体 skip。'
       + ' 缓解：core 里对同一批适配器的**纯解析逻辑**已有离线用例（llm-google / llm-anthropic / llm-minimax）。',
   ],
+  [
+    'packages/web-ui/test/notificationRealData.test.tsx',
+    'U5 真机校验：3 条分支中 2 条（真群 → 可选群芯片；不可枚举平台的 manifest 引导）依赖'
+      + ' scripts/probe-u5-realdata.ts 从真实机器人抓取的 capture（U5_CAPTURE），CI 无机器人 → 整体 skip。'
+      + ' capture 内含 owner 真实群的 id/名称，不得入库，故无法用提交夹具让它常驻。'
+      + ' 缓解：这三条分支的**行为**已由离线夹具用例覆盖'
+      + '（notificationPicker：picker 优先 / 空列表提示 / 非枚举平台引导；notificationGuide：引导文案 + loadGroups 接线）。',
+  ],
 ]);
 
 const reportPath = process.argv[2];

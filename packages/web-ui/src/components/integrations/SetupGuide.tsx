@@ -12,22 +12,76 @@
  * the tutorial every time: it starts **open** for an unconfigured platform and
  * **closed** once credentials are stored.
  */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { consoleUrlFor, guideHeading, guideSteps } from '../../lib/platformI18n.ts';
+import { notificationDestinationFields } from '../../lib/platformNotifications.ts';
 import type { PlatformStatus } from '../../lib/platformIntegrations.ts';
 
 export interface SetupGuideProps {
   status: PlatformStatus;
   /** Credentials already stored → the guide starts collapsed. */
   configured: boolean;
+  /**
+   * Whether the platform can enumerate its conversations. It chooses the *shape*
+   * of the destination step: an enumerable platform gets the concrete
+   * "add the bot to a group → load groups → pick it" workflow, one we cannot
+   * enumerate gets the manifest's own explanation (slice U1) instead.
+   */
+  canListChannels?: boolean;
+  /**
+   * *Why* this platform cannot list conversations (an i18n key from the
+   * manifest's `channelEnumerationGuidance`, slice U1). Used only for the
+   * non-enumerable shape above.
+   */
+  channelsGuidance?: string | null;
 }
 
-export function SetupGuide({ status, configured }: SetupGuideProps) {
+export function SetupGuide({
+  status,
+  configured,
+  canListChannels = false,
+  channelsGuidance = null,
+}: SetupGuideProps) {
   const { t, i18n } = useTranslation(['settings', 'common']);
   const [open, setOpen] = useState(!configured);
 
-  const steps = guideSteps(i18n, t, status.id);
+  const steps = useMemo(() => {
+    const content = guideSteps(i18n, t, status.id);
+    // "Connect, then say where notifications go": credentials alone leave the
+    // bot unable to deliver anything, so a platform that declares a destination
+    // gets one final step. It is driven by the manifest annotation, so it
+    // appears for every outbound platform without anyone listing them.
+    if (notificationDestinationFields(status.fields).length === 0) return content;
+
+    // The *same* step in the shape the platform can actually support. An
+    // enumerable platform gets the concrete three-beat workflow the requirement
+    // asks for ("add the bot to a group → load groups → pick it"); one we cannot
+    // enumerate gets the manifest's own words (slice U1) — never a silent id box.
+    const genericDestination = t('settings:integrations.guide.destinationStep.desc', {
+      defaultValue:
+        'Pick the chat or user that should receive approvals and notifications — without it they have nowhere to go.',
+    });
+    const destinationStep = canListChannels
+      ? {
+          title: t('settings:integrations.guide.selectChatStep.title', {
+            defaultValue: 'Pick the notification group',
+          }),
+          desc: t('settings:integrations.guide.selectChatStep.desc', {
+            defaultValue:
+              'Add the bot to a group in your IM → click “Load groups” → pick it from the list.',
+          }),
+        }
+      : {
+          title: t('settings:integrations.guide.destinationStep.title', {
+            defaultValue: 'Set a notification destination',
+          }),
+          desc: channelsGuidance
+            ? t(channelsGuidance, { defaultValue: genericDestination })
+            : genericDestination,
+        };
+    return [...content, destinationStep];
+  }, [i18n, t, status.id, status.fields, canListChannels, channelsGuidance]);
   const consoleUrl = consoleUrlFor(status.id);
   const description = t(`settings:integrations.platforms.${status.id}.description`, { defaultValue: '' });
 

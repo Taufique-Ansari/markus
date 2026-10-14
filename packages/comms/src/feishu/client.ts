@@ -226,6 +226,43 @@ export class FeishuClient {
     return data.data?.items ?? [];
   }
 
+  /**
+   * Resolve platform user ids (`open_id`) to display names via the contact API.
+   *
+   * Feishu **silently omits** fields the app may not read (it does not error):
+   * without the `contact:user.base:readonly` scope — or with the user outside the
+   * app's contact visibility range — only identity fields come back and `name`
+   * is absent. So this returns whatever it can and never throws: a missing name
+   * must degrade to the raw id, never break a card rewrite.
+   */
+  async getUserNames(openIds: string[]): Promise<Map<string, string>> {
+    const names = new Map<string, string>();
+    const ids = [...new Set(openIds.filter((id): id is string => !!id))];
+    if (ids.length === 0) return names;
+
+    const token = await this.getTenantToken();
+    const qs = ids.map(id => `user_ids=${encodeURIComponent(id)}`).join('&');
+
+    const res = await httpFetch(
+      `${this.domain}/open-apis/contact/v3/users/batch?${qs}&user_id_type=open_id`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+
+    const data = (await res.json()) as {
+      code: number;
+      msg?: string;
+      data?: { items?: Array<{ open_id?: string; name?: string }> };
+    };
+    if (data.code !== 0) {
+      log.warn(`Feishu user-name lookup unavailable: ${data.msg ?? data.code}`);
+      return names;
+    }
+    for (const item of data.data?.items ?? []) {
+      if (item.open_id && item.name) names.set(item.open_id, item.name);
+    }
+    return names;
+  }
+
   async getDocContent(docToken: string, docType: 'docx' | 'sheet' = 'docx'): Promise<string> {
     const token = await this.getTenantToken();
     const endpoint = docType === 'sheet'

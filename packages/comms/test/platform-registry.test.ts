@@ -248,10 +248,25 @@ describe('testConnection probes', () => {
 describe('listChannels (channel picker)', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('is declared by feishu only — a platform that cannot enumerate says so', () => {
-    expect(getManifest('feishu')!.listChannels).toBeTypeOf('function');
-    for (const id of ['telegram', 'slack', 'whatsapp', 'discord']) {
+  it('is declared by the enumerable platforms — the rest say so honestly', () => {
+    for (const id of ['feishu', 'slack', 'discord']) {
+      expect(getManifest(id)!.listChannels, id).toBeTypeOf('function');
+    }
+    for (const id of ['telegram', 'whatsapp']) {
       expect(getManifest(id)!.listChannels, id).toBeUndefined();
+    }
+  });
+
+  it('marks each non-enumerable platform with guidance copy (not silence)', () => {
+    for (const id of ['telegram', 'whatsapp']) {
+      const m = getManifest(id)!;
+      expect(m.listChannels, id).toBeUndefined();
+      expect(m.channelEnumerationGuidance, id).toMatch(/^settings:instances\.routing\.guidance\./);
+    }
+    // An enumerable platform carries no guidance, so the two facts cannot
+    // disagree — guidance never implies "cannot list" the other way round.
+    for (const id of ['feishu', 'slack', 'discord']) {
+      expect(getManifest(id)!.channelEnumerationGuidance, id).toBeUndefined();
     }
   });
 
@@ -286,6 +301,100 @@ describe('listChannels (channel picker)', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     await expect(getManifest('feishu')!.listChannels!({})).rejects.toThrow(/appId and appSecret/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // ── Slack ──────────────────────────────────────────────────────────────────
+  it('Slack: maps conversations the bot is a member of, dropping the rest', async () => {
+    const fetchMock = vi.fn(async () => ({
+      json: async () => ({
+        ok: true,
+        channels: [
+          { id: 'C1', name: 'general', is_member: true },
+          { id: 'C2', name: 'not-joined', is_member: false },
+          { id: 'C3', name: 'private', is_member: true },
+          { name: 'no id — must not surface' },
+        ],
+        response_metadata: { next_cursor: '' },
+      }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(await getManifest('slack')!.listChannels!({ botToken: 'xoxb-1' })).toEqual([
+      { id: 'C1', name: 'general', kind: 'channel' },
+      { id: 'C3', name: 'private', kind: 'channel' },
+    ]);
+    expect(String(fetchMock.mock.calls[0]![0])).toContain('/conversations.list');
+  });
+
+  it('Slack: follows the pagination cursor', async () => {
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call += 1;
+      return {
+        json: async () =>
+          call === 1
+            ? { ok: true, channels: [{ id: 'C1', name: 'a', is_member: true }], response_metadata: { next_cursor: 'n1' } }
+            : { ok: true, channels: [{ id: 'C2', name: 'b', is_member: true }], response_metadata: { next_cursor: '' } },
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    expect(await getManifest('slack')!.listChannels!({ botToken: 'x' })).toEqual([
+      { id: 'C1', name: 'a', kind: 'channel' },
+      { id: 'C2', name: 'b', kind: 'channel' },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('Slack: propagates ok:false as an error, never an empty list', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ json: async () => ({ ok: false, error: 'invalid_auth' }) })));
+    await expect(getManifest('slack')!.listChannels!({ botToken: 'x' })).rejects.toThrow(/invalid_auth/);
+  });
+
+  it('Slack: throws without credentials and never calls the API', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(getManifest('slack')!.listChannels!({})).rejects.toThrow(/botToken/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // ── Discord ────────────────────────────────────────────────────────────────
+  it('Discord: maps each guild’s text channels, dropping non-text channels', async () => {
+    const fetchMock = vi.fn(async (url: string | URL) => {
+      const u = String(url);
+      if (u.includes('/users/@me/guilds')) {
+        return { ok: true, json: async () => [{ id: 'G1', name: 'Alpha' }] };
+      }
+      if (u.includes('/guilds/G1/channels')) {
+        return {
+          ok: true,
+          json: async () => [
+            { id: 'T1', name: 'general', type: 0 },
+            { id: 'V1', name: 'Voice', type: 2 },
+            { id: 'K1', name: 'category', type: 4 },
+          ],
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    // The label is prefixed with the guild name — channel names are not unique
+    // across guilds, so a bare `#general` would be ambiguous.
+    expect(await getManifest('discord')!.listChannels!({ botToken: 'x' })).toEqual([
+      { id: 'T1', name: 'Alpha / #general', kind: 'channel' },
+    ]);
+  });
+
+  it('Discord: propagates a non-OK response as an error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 401, json: async () => ({}) })));
+    await expect(getManifest('discord')!.listChannels!({ botToken: 'x' })).rejects.toThrow(/401/);
+  });
+
+  it('Discord: throws without credentials and never calls the API', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(getManifest('discord')!.listChannels!({})).rejects.toThrow(/botToken/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

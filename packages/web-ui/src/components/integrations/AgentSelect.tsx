@@ -82,15 +82,23 @@ export interface AgentSelectProps {
   /** Manifest key this control edits. */
   fieldKey: string;
   ariaLabel?: string;
+  /**
+   * Lock the picker. The guided setup (Feishu scan-to-create) mints the app with
+   * the chosen agent baked in, so once the QR exists the choice must not change
+   * under it — otherwise the picker would show one agent while the created bot
+   * answers as another.
+   */
+  disabled?: boolean;
 }
 
-export function AgentSelect({ value, options, onChange, fieldKey, ariaLabel }: AgentSelectProps) {
+export function AgentSelect({ value, options, onChange, fieldKey, ariaLabel, disabled }: AgentSelectProps) {
   const { t } = useTranslation(['settings']);
   return (
     <FilterableSelect
       value={typeof value === 'string' ? value : ''}
       options={options.map((a) => ({ value: a.id, label: a.name, hint: a.role }))}
       onChange={(next) => onChange(fieldKey, next)}
+      disabled={disabled}
       // The empty row is what makes "unbound" selectable — clearing a binding
       // must be as easy as setting one.
       placeholder={t('settings:integrations.agentSelect.none', { defaultValue: 'Not bound' })}

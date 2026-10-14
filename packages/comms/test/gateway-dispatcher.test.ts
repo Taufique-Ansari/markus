@@ -1,9 +1,11 @@
 /**
- * Slice G4 — the OutboundDispatcher.
+ * The OutboundDispatcher.
  *
  * This is the slice's acceptance surface:
  *   • an approval is delivered to **Telegram and Slack**, not only Feishu (D5);
  *   • a notification for an **unbound** agent still lands on the Secretary channel;
+ *   • a message with no destination at all is reported as an explicit
+ *     **undelivered** state — never a silent drop (R1);
  *   • severity splits routing: `action_required` is pushed immediately, `info` may
  *     be digested without ever swallowing the urgent one.
  */
@@ -11,6 +13,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { OutboundDispatcher, type OutboundSink } from '../src/gateway/dispatcher.js';
 import { verifyActionRef, type OutboundMessage } from '../src/gateway/outbound.js';
 import type { NotifyTarget, NotifyTargetLookup } from '../src/gateway/notify-route.js';
+import type { NotifyPreferences, NotifyPreferenceSource } from '../src/gateway/notify-prefs.js';
 
 interface Delivery {
   target: NotifyTarget;
@@ -30,6 +33,22 @@ function recordingSink(capsOf: (t: NotifyTarget) => Record<string, boolean>): Ou
   };
 }
 
+/** A lookup with nothing declared — the walk falls to whatever each test overrides. */
+function lookupOf(overrides: Partial<NotifyTargetLookup> = {}): NotifyTargetLookup {
+  return {
+    agentTarget: () => undefined,
+    instanceDeclaredTarget: () => undefined,
+    instanceAgentTarget: () => undefined,
+    globalTarget: () => undefined,
+    ...overrides,
+  };
+}
+
+/** A preference source that returns the same preferences for every target. */
+function prefsOf(prefs: NotifyPreferences | undefined): NotifyPreferenceSource {
+  return { preferencesFor: () => prefs };
+}
+
 const TELEGRAM: NotifyTarget = { platform: 'telegram', instanceId: 'bi_sales', nativeId: '111' };
 const SLACK: NotifyTarget = { platform: 'slack', instanceId: 'bi_ops', nativeId: 'C1' };
 const SECRETARY: NotifyTarget = { platform: 'feishu', instanceId: 'bi_secretary', nativeId: 'oc_owner' };
@@ -42,14 +61,45 @@ const APPROVAL: OutboundMessage = {
   origin: { agentId: 'agt_ops' },
 };
 
+describe('OutboundDispatcher — agent attribution', () => {
+  it('prefixes the delivered body with the originating agent’s name', async () => {
+    const sink = recordingSink(() => ({ markdown: true }));
+    const lookup = lookupOf({ globalTarget: () => SECRETARY });
+    const dispatcher = new OutboundDispatcher({
+      lookup,
+      sink,
+      agentName: (id) => (id === 'agt_ops' ? '运营助手' : undefined),
+    });
+
+    await dispatcher.dispatch(APPROVAL);
+    expect(sink.deliveries[0].text).toContain('**来自**：运营助手');
+    expect(sink.deliveries[0].text).toContain('部署请求');
+  });
+
+  it('delivers unattributed when the name is unknown — attribution never blocks', async () => {
+    const sink = recordingSink(() => ({ markdown: true }));
+    const lookup = lookupOf({ globalTarget: () => SECRETARY });
+    const dispatcher = new OutboundDispatcher({ lookup, sink, agentName: () => undefined });
+
+    const outcome = await dispatcher.dispatch(APPROVAL);
+    expect(outcome.delivered).toBe(true);
+    expect(sink.deliveries[0].text).not.toContain('来自');
+  });
+
+  it('does not double-prefix a message that already carries its attribution', async () => {
+    const sink = recordingSink(() => ({ markdown: true }));
+    const lookup = lookupOf({ globalTarget: () => SECRETARY });
+    const dispatcher = new OutboundDispatcher({ lookup, sink, agentName: () => '运营助手' });
+
+    await dispatcher.dispatch({ ...APPROVAL, body: '**来自**：运营助手\n\n部署请求' });
+    expect(sink.deliveries[0].text.match(/来自/g)).toHaveLength(1);
+  });
+});
+
 describe('OutboundDispatcher.dispatch', () => {
   it('delivers an approval to a Telegram bot', async () => {
     const sink = recordingSink(() => ({ markdown: true }));
-    const lookup: NotifyTargetLookup = {
-      agentTarget: () => undefined,
-      instanceTarget: () => TELEGRAM,
-      globalTarget: () => SECRETARY,
-    };
+    const lookup = lookupOf({ instanceAgentTarget: () => TELEGRAM, globalTarget: () => SECRETARY });
     const dispatcher = new OutboundDispatcher({ lookup, sink });
 
     const outcome = await dispatcher.dispatch(APPROVAL);
@@ -62,11 +112,7 @@ describe('OutboundDispatcher.dispatch', () => {
 
   it('delivers the same approval to a Slack bot', async () => {
     const sink = recordingSink(() => ({ cards: true }));
-    const lookup: NotifyTargetLookup = {
-      agentTarget: () => SLACK,
-      instanceTarget: () => undefined,
-      globalTarget: () => SECRETARY,
-    };
+    const lookup = lookupOf({ agentTarget: () => SLACK, globalTarget: () => SECRETARY });
     const dispatcher = new OutboundDispatcher({ lookup, sink });
 
     const outcome = await dispatcher.dispatch(APPROVAL);
@@ -77,11 +123,7 @@ describe('OutboundDispatcher.dispatch', () => {
 
   it('routes an unbound agent\u2019s notification to the Secretary channel', async () => {
     const sink = recordingSink(() => ({ cards: true }));
-    const lookup: NotifyTargetLookup = {
-      agentTarget: () => undefined,
-      instanceTarget: () => undefined,
-      globalTarget: () => SECRETARY,
-    };
+    const lookup = lookupOf({ globalTarget: () => SECRETARY });
     const dispatcher = new OutboundDispatcher({ lookup, sink });
 
     const outcome = await dispatcher.dispatch({ ...APPROVAL, origin: { agentId: 'agt_nobody' } });
@@ -90,19 +132,26 @@ describe('OutboundDispatcher.dispatch', () => {
     expect(sink.deliveries[0].target.nativeId).toBe('oc_owner');
   });
 
-  it('reports failure loudly when no target exists at any level', async () => {
+  it('reports an explicit undelivered state when no target exists at any level', async () => {
     const sink = recordingSink(() => ({}));
-    const lookup: NotifyTargetLookup = {
-      agentTarget: () => undefined,
-      instanceTarget: () => undefined,
-      globalTarget: () => undefined,
-    };
-    const dispatcher = new OutboundDispatcher({ lookup, sink });
+    const dispatcher = new OutboundDispatcher({ lookup: lookupOf(), sink });
 
     const outcome = await dispatcher.dispatch(APPROVAL);
     expect(outcome.delivered).toBe(false);
+    expect(outcome.undelivered).toBe(true);
     expect(outcome.reason).toBe('no-notify-target');
     expect(sink.deliveries).toHaveLength(0);
+  });
+
+  it('exposes the same walk as a read-only resolve() (for a Settings reachability state)', () => {
+    const dispatcher = new OutboundDispatcher({ lookup: lookupOf({ globalTarget: () => SECRETARY }), sink: recordingSink(() => ({})) });
+    expect(dispatcher.resolve({ agentId: 'agt_x' })).toEqual({
+      status: 'resolved',
+      target: SECRETARY,
+      matchedScope: 'global',
+    });
+    const bare = new OutboundDispatcher({ lookup: lookupOf(), sink: recordingSink(() => ({})) });
+    expect(bare.resolve({})).toEqual({ status: 'undelivered', reason: 'no-notify-target' });
   });
 
   it('does not report delivered when the sink fails', async () => {
@@ -110,22 +159,15 @@ describe('OutboundDispatcher.dispatch', () => {
       capabilities: () => ({}),
       send: async () => undefined,
     };
-    const lookup: NotifyTargetLookup = {
-      agentTarget: () => undefined,
-      instanceTarget: () => undefined,
-      globalTarget: () => SECRETARY,
-    };
+    const lookup = lookupOf({ globalTarget: () => SECRETARY });
     const outcome = await new OutboundDispatcher({ lookup, sink }).dispatch(APPROVAL);
     expect(outcome.delivered).toBe(false);
+    expect(outcome.undelivered).toBeUndefined();
   });
 });
 
 describe('OutboundDispatcher — severity split', () => {
-  const lookup: NotifyTargetLookup = {
-    agentTarget: () => undefined,
-    instanceTarget: () => undefined,
-    globalTarget: () => SECRETARY,
-  };
+  const lookup = lookupOf({ globalTarget: () => SECRETARY });
 
   it('pushes action_required immediately even when digesting info', async () => {
     const sink = recordingSink(() => ({ markdown: true }));
@@ -155,6 +197,15 @@ describe('OutboundDispatcher — severity split', () => {
     expect(dispatcher.pendingDigestCount()).toBe(0);
   });
 
+  it('flags an undelivered info message instead of buffering it', async () => {
+    const sink = recordingSink(() => ({ markdown: true }));
+    const dispatcher = new OutboundDispatcher({ lookup: lookupOf(), sink, digestInfo: true });
+    const outcome = await dispatcher.dispatch({ title: 'a', body: '1', severity: 'info' });
+    expect(outcome.undelivered).toBe(true);
+    expect(dispatcher.pendingDigestCount()).toBe(0);
+    expect(sink.deliveries).toHaveLength(0);
+  });
+
   it('flushes pending info before an urgent message so nothing is reordered', async () => {
     const sink = recordingSink(() => ({ markdown: true }));
     const dispatcher = new OutboundDispatcher({ lookup, sink, digestInfo: true });
@@ -180,16 +231,12 @@ describe('OutboundDispatcher — severity split', () => {
 describe('OutboundDispatcher — notification source', () => {
   it('converts and dispatches a HITL notification via attachNotifications', async () => {
     const sink = recordingSink(() => ({ markdown: true }));
-    const lookup: NotifyTargetLookup = {
-      agentTarget: () => undefined,
-      instanceTarget: () => undefined,
-      globalTarget: () => SECRETARY,
-    };
+    const lookup = lookupOf({ globalTarget: () => SECRETARY });
     const dispatcher = new OutboundDispatcher({ lookup, sink });
 
     let handler: ((n: unknown) => void) | undefined;
     const detach = dispatcher.attachNotifications({
-      onNotification: (cb) => {
+      onChannelNotification: (cb) => {
         handler = cb as (n: unknown) => void;
         return () => { handler = undefined; };
       },
@@ -206,15 +253,14 @@ describe('OutboundDispatcher — notification source', () => {
 
   it('routes an approval to the producing agent when the notification names it', async () => {
     const sink = recordingSink(() => ({ markdown: true }));
-    const lookup: NotifyTargetLookup = {
+    const lookup = lookupOf({
       agentTarget: (_org, agentId) => (agentId === 'agt_ops' ? TELEGRAM : undefined),
-      instanceTarget: () => undefined,
       globalTarget: () => SECRETARY,
-    };
+    });
     const dispatcher = new OutboundDispatcher({ lookup, sink });
 
     let handler: ((n: unknown) => void) | undefined;
-    dispatcher.attachNotifications({ onNotification: (cb) => { handler = cb as (n: unknown) => void; return () => {}; } });
+    dispatcher.attachNotifications({ onChannelNotification: (cb) => { handler = cb as (n: unknown) => void; return () => {}; } });
     handler!({ type: 'approval_request', title: 'x', body: 'y', metadata: { approvalId: 'apr_1', agentId: 'agt_ops' } });
 
     await vi.waitFor(() => expect(sink.deliveries).toHaveLength(1));
@@ -223,15 +269,11 @@ describe('OutboundDispatcher — notification source', () => {
 
   it('signs approval refs when an action secret is configured', async () => {
     const sink = recordingSink(() => ({ markdown: true }));
-    const lookup: NotifyTargetLookup = {
-      agentTarget: () => undefined,
-      instanceTarget: () => undefined,
-      globalTarget: () => SECRETARY,
-    };
+    const lookup = lookupOf({ globalTarget: () => SECRETARY });
     const dispatcher = new OutboundDispatcher({ lookup, sink, actionSecret: 'shh' });
 
     let handler: ((n: unknown) => void) | undefined;
-    dispatcher.attachNotifications({ onNotification: (cb) => { handler = cb as (n: unknown) => void; return () => {}; } });
+    dispatcher.attachNotifications({ onChannelNotification: (cb) => { handler = cb as (n: unknown) => void; return () => {}; } });
     handler!({
       type: 'approval_request',
       title: 'x',
@@ -245,5 +287,88 @@ describe('OutboundDispatcher — notification source', () => {
     expect(text).not.toContain('apr_secret');
     const ref = text.split('[部署] ')[1]?.trim();
     expect(verifyActionRef(ref!, 'shh')).toEqual({ approvalId: 'apr_secret', action: 'deploy' });
+  });
+});
+
+describe('OutboundDispatcher — notification-preference enforcement (R6)', () => {
+  const lookup = lookupOf({ globalTarget: () => SECRETARY });
+  const INFO: OutboundMessage = { title: 'done', body: 'x', severity: 'info', priority: 'high' };
+
+  it('suppresses an approval when notifyOnApproval is off — and reports it, not a silent drop', async () => {
+    const sink = recordingSink(() => ({ markdown: true }));
+    const dispatcher = new OutboundDispatcher({ lookup, sink, preferences: prefsOf({ notifyOnApproval: false }) });
+
+    const outcome = await dispatcher.dispatch(APPROVAL);
+    expect(outcome.delivered).toBe(false);
+    expect(outcome.suppressed).toBe(true);
+    expect(outcome.reason).toBe('notify-off-approval');
+    expect(sink.deliveries).toHaveLength(0);
+  });
+
+  it('delivers an approval by default (notifyOnApproval defaults to on)', async () => {
+    const sink = recordingSink(() => ({ markdown: true }));
+    const dispatcher = new OutboundDispatcher({ lookup, sink, preferences: prefsOf({}) });
+    expect((await dispatcher.dispatch(APPROVAL)).delivered).toBe(true);
+    expect(sink.deliveries).toHaveLength(1);
+  });
+
+  it('suppresses an event when notifyOnNotification is off (the default)', async () => {
+    const sink = recordingSink(() => ({ markdown: true }));
+    const dispatcher = new OutboundDispatcher({ lookup, sink, preferences: prefsOf({ notifyOnNotification: false }) });
+
+    const outcome = await dispatcher.dispatch(INFO);
+    expect(outcome.delivered).toBe(false);
+    expect(outcome.suppressed).toBe(true);
+    expect(outcome.reason).toBe('notify-off-notification');
+    expect(sink.deliveries).toHaveLength(0);
+  });
+
+  it('delivers an event when notifyOnNotification is on and its priority is allowed', async () => {
+    const sink = recordingSink(() => ({ markdown: true }));
+    const dispatcher = new OutboundDispatcher({
+      lookup,
+      sink,
+      preferences: prefsOf({ notifyOnNotification: true, notifyPriority: 'high,urgent' }),
+    });
+    expect((await dispatcher.dispatch(INFO)).delivered).toBe(true);
+    expect(sink.deliveries).toHaveLength(1);
+  });
+
+  it('filters an event below the notifyPriority threshold', async () => {
+    const sink = recordingSink(() => ({ markdown: true }));
+    const dispatcher = new OutboundDispatcher({
+      lookup,
+      sink,
+      preferences: prefsOf({ notifyOnNotification: true, notifyPriority: ['high', 'urgent'] }),
+    });
+
+    const outcome = await dispatcher.dispatch({ ...INFO, priority: 'low' });
+    expect(outcome.delivered).toBe(false);
+    expect(outcome.suppressed).toBe(true);
+    expect(outcome.reason).toBe('priority-filtered');
+    expect(sink.deliveries).toHaveLength(0);
+  });
+
+  it('does not buffer a suppressed event for the digest', async () => {
+    const sink = recordingSink(() => ({ markdown: true }));
+    const dispatcher = new OutboundDispatcher({
+      lookup,
+      sink,
+      digestInfo: true,
+      preferences: prefsOf({ notifyOnNotification: false }),
+    });
+
+    const outcome = await dispatcher.dispatch({ title: 'a', body: '1', severity: 'info' });
+    expect(outcome.suppressed).toBe(true);
+    expect(dispatcher.pendingDigestCount()).toBe(0);
+    expect(sink.deliveries).toHaveLength(0);
+  });
+
+  it('does not filter when no preference source is wired (back-compat)', async () => {
+    const sink = recordingSink(() => ({ markdown: true }));
+    const dispatcher = new OutboundDispatcher({ lookup, sink });
+    expect((await dispatcher.dispatch(APPROVAL)).delivered).toBe(true);
+    expect((await dispatcher.dispatch({ title: 'a', body: '1', severity: 'info' })).delivered).toBe(true);
+    expect(sink.deliveries).toHaveLength(2);
   });
 });

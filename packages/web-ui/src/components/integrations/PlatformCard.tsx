@@ -21,13 +21,14 @@
  * Nothing here knows what a platform is called, and nothing here saves.
  */
 
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ConnectionState } from '../../lib/instanceIntegrations.ts';
 import { fieldText } from '../../lib/platformI18n.ts';
 import type { PlatformField, PlatformStatus } from '../../lib/platformIntegrations.ts';
 import { Switch } from '../Switch.tsx';
 import { AgentSelect, type AgentOption } from './AgentSelect.tsx';
+import { HINT, INPUT, ROW, ROW_CONTROL, ROW_LABEL, ROW_START, chipClass } from './ui.ts';
 
 // ─── Connection badge ────────────────────────────────────────────────────────
 
@@ -102,6 +103,42 @@ export function Msg({ type, text }: { type: 'ok' | 'err'; text: string }) {
 
 // ─── Fields ──────────────────────────────────────────────────────────────────
 
+/**
+ * One setting as a **row**: label on the left, control on the right, on one
+ * line (it wraps when the viewport is too narrow for both). Every field in the
+ * card is this shape — see `ui.ts` for why the scale and the row live there.
+ */
+function FieldRow({
+  label,
+  control,
+  help,
+  htmlFor,
+  start = false,
+}: {
+  label: ReactNode;
+  control: ReactNode;
+  help?: ReactNode;
+  htmlFor?: string;
+  /** Control is taller than one line (a chip cluster) → align to the top. */
+  start?: boolean;
+}) {
+  return (
+    <div>
+      <div className={start ? ROW_START : ROW}>
+        {htmlFor ? (
+          <label htmlFor={htmlFor} className={ROW_LABEL}>
+            {label}
+          </label>
+        ) : (
+          <span className={ROW_LABEL}>{label}</span>
+        )}
+        <div className={ROW_CONTROL}>{control}</div>
+      </div>
+      {help ? <p className={`${HINT} mt-1.5`}>{help}</p> : null}
+    </div>
+  );
+}
+
 /** One manifest field → one input widget. Pure presentation. */
 export function FieldInput({
   field,
@@ -137,28 +174,26 @@ export function FieldInput({
   const placeholderText = text.placeholder;
   const options = text.options ?? field.options ?? [];
 
-  const label = (
-    <label htmlFor={inputId} className="block text-xs font-medium text-fg-secondary mb-1.5">
+  // The label text with its required marker, rendered inside the row.
+  const labelNode = (
+    <>
       {labelText}
       {field.required && <span className="text-red-500 ml-0.5">*</span>}
-    </label>
+    </>
   );
 
-  const help = (helpText || (field.secret && hasStored)) && (
-    <p className="text-[11px] text-fg-tertiary mt-1">
-      {field.secret && hasStored ? t('settings:integrations.secretStored') : helpText}
-    </p>
-  );
+  const helpNode: ReactNode =
+    field.secret && hasStored
+      ? t('settings:integrations.secretStored')
+      : helpText || undefined;
 
   if (field.type === 'boolean') {
     const on = value === true;
     return (
-      <div>
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="text-sm text-fg-primary">{labelText}</div>
-            {helpText && <div className="text-xs text-fg-tertiary mt-0.5">{helpText}</div>}
-          </div>
+      <FieldRow
+        label={labelText}
+        help={helpText}
+        control={
           <Switch
             checked={on}
             onChange={(next) => onChange(field.key, next)}
@@ -166,118 +201,128 @@ export function FieldInput({
             size="md"
             testId={`integration-field-${field.key}`}
           />
-        </div>
-      </div>
+        }
+      />
     );
   }
 
   if (field.type === 'agent') {
     return (
-      <div>
-        {label}
-        <div data-testid={`integration-field-${field.key}`}>
-          <AgentSelect
-            value={value}
-            options={agentOptions}
-            onChange={onChange}
-            fieldKey={field.key}
-            ariaLabel={labelText}
-          />
-        </div>
-        {help}
-      </div>
+      <FieldRow
+        label={labelNode}
+        help={helpNode}
+        control={
+          <div className="w-full" data-testid={`integration-field-${field.key}`}>
+            <AgentSelect
+              value={value}
+              options={agentOptions}
+              onChange={onChange}
+              fieldKey={field.key}
+              ariaLabel={labelText}
+            />
+          </div>
+        }
+      />
     );
   }
 
   if (field.type === 'select' && field.multiple) {
     const selected = Array.isArray(value) ? (value as unknown[]).map(String) : [];
     return (
-      <div>
-        {label}
-        <div className="flex flex-wrap gap-2" data-testid={`integration-field-${field.key}`}>
-          {options.map((opt) => {
-            const active = selected.includes(opt.value);
-            return (
-              <button
-                key={opt.value}
-                type="button"
-                aria-pressed={active}
-                data-option={opt.value}
-                onClick={() =>
-                  onChange(
-                    field.key,
-                    active ? selected.filter((v) => v !== opt.value) : [...selected, opt.value],
-                  )
-                }
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg border transition-colors ${
-                  active
-                    ? 'bg-brand-500/10 border-brand-500/30 text-brand-600'
-                    : 'bg-surface-primary border-border-default text-fg-tertiary hover:border-fg-tertiary'
-                }`}
-              >
-                {opt.label}
-              </button>
-            );
-          })}
-        </div>
-        {help}
-      </div>
+      <FieldRow
+        start
+        label={labelNode}
+        help={helpNode}
+        control={
+          <div
+            className="flex flex-wrap justify-end gap-1.5"
+            data-testid={`integration-field-${field.key}`}
+          >
+            {options.map((opt) => {
+              const active = selected.includes(opt.value);
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  aria-pressed={active}
+                  data-option={opt.value}
+                  onClick={() =>
+                    onChange(
+                      field.key,
+                      active ? selected.filter((v) => v !== opt.value) : [...selected, opt.value],
+                    )
+                  }
+                  className={chipClass(active)}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+        }
+      />
     );
   }
 
   if (field.type === 'select') {
     return (
-      <div>
-        {label}
-        <select
-          id={inputId}
-          data-testid={`integration-field-${field.key}`}
-          value={typeof value === 'string' ? value : ''}
-          onChange={(e) => onChange(field.key, e.target.value)}
-          className="w-full px-3 py-2 text-sm bg-surface-primary border border-border-default rounded-lg text-fg-primary focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-500 transition-colors"
-        >
-          {(field.options ?? []).map((opt) => {
-            const label = options.find((o) => o.value === opt.value)?.label ?? opt.label;
-            return (
-              <option key={opt.value} value={opt.value}>
-                {label}
-              </option>
-            );
-          })}
-        </select>
-        {help}
-      </div>
+      <FieldRow
+        label={labelNode}
+        help={helpNode}
+        htmlFor={inputId}
+        control={
+          <select
+            id={inputId}
+            data-testid={`integration-field-${field.key}`}
+            value={typeof value === 'string' ? value : ''}
+            onChange={(e) => onChange(field.key, e.target.value)}
+            className={INPUT}
+          >
+            {(field.options ?? []).map((opt) => {
+              const optLabel = options.find((o) => o.value === opt.value)?.label ?? opt.label;
+              return (
+                <option key={opt.value} value={opt.value}>
+                  {optLabel}
+                </option>
+              );
+            })}
+          </select>
+        }
+      />
     );
   }
 
   const isSecret = field.type === 'password';
   const isNumber = field.type === 'number';
   return (
-    <div>
-      {label}
-      <div className="relative">
-        <input
-          id={inputId}
-          data-testid={`integration-field-${field.key}`}
-          type={isNumber ? 'number' : isSecret && !reveal ? 'password' : 'text'}
-          value={value === undefined || value === null ? '' : String(value)}
-          placeholder={isSecret && hasStored ? t('settings:integrations.secretStoredPlaceholder') : placeholderText}
-          onChange={(e) => onChange(field.key, e.target.value)}
-          className={`w-full px-3 py-2 text-sm bg-surface-primary border border-border-default rounded-lg text-fg-primary placeholder-fg-tertiary focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-500 transition-colors${isSecret ? ' font-mono pr-10' : ''}`}
-        />
-        {isSecret && (
-          <button
-            type="button"
-            aria-label={reveal ? t('settings:integrations.hide', { defaultValue: 'Hide' }) : t('settings:integrations.show', { defaultValue: 'Show' })}
-            onClick={() => setReveal((v) => !v)}
-            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-fg-tertiary hover:text-fg-secondary transition-colors"
-          >
-            {reveal ? '🙈' : '👁'}
-          </button>
-        )}
-      </div>
-      {help}
-    </div>
+    <FieldRow
+      label={labelNode}
+      help={helpNode}
+      htmlFor={inputId}
+      control={
+        <div className="relative w-full">
+          <input
+            id={inputId}
+            data-testid={`integration-field-${field.key}`}
+            type={isNumber ? 'number' : isSecret && !reveal ? 'password' : 'text'}
+            value={value === undefined || value === null ? '' : String(value)}
+            placeholder={isSecret && hasStored ? t('settings:integrations.secretStoredPlaceholder') : placeholderText}
+            onChange={(e) => onChange(field.key, e.target.value)}
+            className={`${INPUT}${isSecret ? ' font-mono pr-10' : ''}`}
+          />
+          {isSecret && (
+            <button
+              type="button"
+              aria-label={reveal ? t('settings:integrations.hide', { defaultValue: 'Hide' }) : t('settings:integrations.show', { defaultValue: 'Show' })}
+              onClick={() => setReveal((v) => !v)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-fg-tertiary hover:text-fg-secondary transition-colors"
+            >
+              {reveal ? '🙈' : '👁'}
+            </button>
+          )}
+        </div>
+      }
+    />
   );
 }
 

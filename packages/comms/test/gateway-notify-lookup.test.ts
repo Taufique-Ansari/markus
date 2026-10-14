@@ -1,14 +1,16 @@
 /**
- * Slice G4 — the production notify-target lookup, backed by `channel_bindings`.
+ * The production notify-target lookup, backed by `channel_bindings` +
+ * `platform_instances`.
  *
- * A notification target is a binding whose `kind` is `notification` — the same
- * table that routes inbound, read for the *outbound* question. Keeping it in one
- * table is what lets "the agent's channel" and "where the agent's notifications
- * go" agree by construction, and lets the global level fall back to whoever the
- * org's Secretary is.
+ * The decisive new property (R1): step 2 — an instance's **declared**
+ * destination — resolves with *no binding at all*, so a bot the user configured
+ * in Settings is reachable even when no agent has ever been DM'd. The rest of the
+ * walk (agent → notify-agent → global) keeps its previous semantics.
  */
 import { describe, it, expect } from 'vitest';
 import { RepoNotifyTargetLookup, type BindingRowLike, type InstanceRowLike } from '../src/gateway/notify-lookup.js';
+import { resolveNotifyTarget } from '../src/gateway/notify-route.js';
+import type { PlatformField } from '../src/platforms/registry.js';
 
 function binding(over: Partial<BindingRowLike>): BindingRowLike {
   return {
@@ -28,6 +30,12 @@ const INSTANCES: Record<string, InstanceRowLike> = {
   bi_b: { id: 'bi_b', platform: 'slack' },
   bi_sec: { id: 'bi_sec', platform: 'feishu' },
 };
+
+/** A stand-in manifest: a chat destination first, then a user destination. */
+const DECLARED_FIELDS: PlatformField[] = [
+  { key: 'notifyChatId', label: 'Default chat ID', type: 'text', required: false, notifyTarget: 'chat' },
+  { key: 'notifyOpenId', label: 'Default open ID', type: 'text', required: false, notifyTarget: 'user' },
+];
 
 function lookupOf(rows: BindingRowLike[], secretaryId?: string) {
   return new RepoNotifyTargetLookup({
@@ -50,17 +58,81 @@ describe('RepoNotifyTargetLookup', () => {
     });
   });
 
-  it('resolves the instance-level sink for an agent bound in that instance', () => {
+  it('resolves an instance-level `notification` binding sink (step 2, branch c)', () => {
     const lookup = lookupOf([
       binding({ id: 'cb_route', scope: 'instance', instanceId: 'bi_b', nativeId: null, kind: null, agentId: 'agt_ops' }),
       binding({ id: 'cb_notify', scope: 'instance', instanceId: 'bi_b', nativeId: 'C_NOTIFY', agentId: 'agt_bot' }),
     ]);
-    expect(lookup.instanceTarget('default', 'agt_ops')).toEqual({
+    expect(lookup.instanceDeclaredTarget('default', 'agt_ops')).toEqual({
       platform: 'slack',
       instanceId: 'bi_b',
       nativeId: 'C_NOTIFY',
       kind: 'notification',
     });
+  });
+
+  it('reads a destination declared in instance config — with NO binding at all (R1)', () => {
+    const instance: InstanceRowLike = { id: 'bi_f', platform: 'feishu', config: { notifyChatId: 'oc_ops' } };
+    const lookup = new RepoNotifyTargetLookup({
+      bindingRepo: { listByOrg: () => [] },
+      instanceRepo: { findById: () => instance, listByOrg: () => [instance] },
+      fieldDefs: () => DECLARED_FIELDS,
+    });
+    expect(lookup.instanceDeclaredTarget('default', 'agt_unbound')).toEqual({
+      platform: 'feishu',
+      instanceId: 'bi_f',
+      nativeId: 'oc_ops',
+      receiveIdType: 'chat_id',
+      kind: 'notification',
+    });
+  });
+
+  it('maps a `user`-kind declaration onto the wire receive-id type (open_id)', () => {
+    const instance: InstanceRowLike = { id: 'bi_f', platform: 'feishu', config: { notifyOpenId: 'ou_person' } };
+    const lookup = new RepoNotifyTargetLookup({
+      bindingRepo: { listByOrg: () => [] },
+      instanceRepo: { findById: () => instance, listByOrg: () => [instance] },
+      fieldDefs: () => DECLARED_FIELDS,
+    });
+    expect(lookup.instanceDeclaredTarget('default')?.receiveIdType).toBe('open_id');
+  });
+
+  it('prefers the chat declaration over the user declaration (manifest order)', () => {
+    const instance: InstanceRowLike = {
+      id: 'bi_f', platform: 'feishu', config: { notifyChatId: 'oc_chat', notifyOpenId: 'ou_person' },
+    };
+    const lookup = new RepoNotifyTargetLookup({
+      bindingRepo: { listByOrg: () => [] },
+      instanceRepo: { findById: () => instance, listByOrg: () => [instance] },
+      fieldDefs: () => DECLARED_FIELDS,
+    });
+    expect(lookup.instanceDeclaredTarget('default')?.nativeId).toBe('oc_chat');
+  });
+
+  it('ignores a blank declared value and treats the destination as undeclared', () => {
+    const instance: InstanceRowLike = { id: 'bi_f', platform: 'feishu', config: { notifyChatId: '   ' } };
+    const lookup = new RepoNotifyTargetLookup({
+      bindingRepo: { listByOrg: () => [] },
+      instanceRepo: { findById: () => instance, listByOrg: () => [instance] },
+      fieldDefs: () => DECLARED_FIELDS,
+    });
+    expect(lookup.instanceDeclaredTarget('default')).toBeUndefined();
+  });
+
+  it('prefers the agent’s own instance declared destination over an unrelated one', () => {
+    const mine: InstanceRowLike = { id: 'bi_mine', platform: 'telegram', config: { notifyChatId: 'mine' } };
+    const other: InstanceRowLike = { id: 'bi_other', platform: 'slack', config: { notifyChatId: 'other' } };
+    const lookup = new RepoNotifyTargetLookup({
+      bindingRepo: {
+        listByOrg: () => [binding({ id: 'cb_route', scope: 'instance', instanceId: 'bi_mine', nativeId: null, kind: null, agentId: 'agt_ops' })],
+      },
+      instanceRepo: {
+        findById: (id) => (id === 'bi_mine' ? mine : id === 'bi_other' ? other : undefined),
+        listByOrg: () => [other, mine],
+      },
+      fieldDefs: () => DECLARED_FIELDS,
+    });
+    expect(lookup.instanceDeclaredTarget('default', 'agt_ops')?.nativeId).toBe('mine');
   });
 
   it('falls back to the Secretary notification sink at the global level', () => {
@@ -76,15 +148,24 @@ describe('RepoNotifyTargetLookup', () => {
     });
   });
 
-  it('uses the platform fallback when the Secretary has no sink', () => {
+  it('uses a global-scope binding with a native id when the Secretary has no sink', () => {
+    const lookup = lookupOf([
+      binding({ id: 'cb_g', scope: 'global', instanceId: 'bi_sec', nativeId: 'oc_global', agentId: 'agt_x' }),
+    ]);
+    expect(lookup.globalTarget('default')?.nativeId).toBe('oc_global');
+  });
+
+  it('does NOT read a legacy `markus.json` channel — globalTarget is DB-only (R2)', () => {
+    // Before T5 the walk ended on a `fallback` fed from `markus.json`
+    // `integrations.feishu.notifyChatId`. That reader is gone (single source of
+    // truth): with no DB destination the walk is honestly `undefined`, never a
+    // stale file value.
     const lookup = new RepoNotifyTargetLookup({
       bindingRepo: { listByOrg: () => [] },
       instanceRepo: { findById: (id) => INSTANCES[id] },
       orgSecretaryId: () => 'agt_secretary',
-      fallback: (orgId) =>
-        orgId === 'default' ? { platform: 'feishu', instanceId: 'bi_sec', nativeId: 'oc_legacy' } : undefined,
     });
-    expect(lookup.globalTarget('default')?.nativeId).toBe('oc_legacy');
+    expect(lookup.globalTarget('default')).toBeUndefined();
   });
 
   it('treats the agent’s own channel as the target when no notification binding exists', () => {
@@ -115,16 +196,16 @@ describe('RepoNotifyTargetLookup', () => {
   it('returns undefined for an unknown agent', () => {
     const lookup = lookupOf([binding({ agentId: 'agt_other' })]);
     expect(lookup.agentTarget('default', 'agt_x')).toBeUndefined();
-    expect(lookup.instanceTarget('default', 'agt_x')).toBeUndefined();
+    expect(lookup.instanceAgentTarget('default', 'agt_x')).toBeUndefined();
   });
 
-  it('returns undefined when there is no global target and no fallback', () => {
+  it('returns undefined when there is no global target', () => {
     expect(lookupOf([]).globalTarget('default')).toBeUndefined();
   });
 
-  it('resolves the instance’s notification-target agent (G5 UI `config.notifyAgentId`)', () => {
+  it('resolves the instance’s notification-target agent (G5 UI `config.notifyAgentId`, step 3)', () => {
     // Closes the G4×G5 seam: the "Notification target" the operator picks is an
-    // agent; its own conversation is the level-2 sink.
+    // agent; its own conversation is the level-3 sink.
     const lookup = new RepoNotifyTargetLookup({
       bindingRepo: {
         listByOrg: () => [
@@ -134,7 +215,7 @@ describe('RepoNotifyTargetLookup', () => {
       },
       instanceRepo: { findById: (id) => id === 'bi_a' ? { id: 'bi_a', platform: 'telegram', config: { notifyAgentId: 'agt_secretary' } } : INSTANCES[id] },
     });
-    expect(lookup.instanceTarget('default', 'agt_ops')).toEqual({
+    expect(lookup.instanceAgentTarget('default', 'agt_ops')).toEqual({
       platform: 'telegram',
       instanceId: 'bi_a',
       nativeId: 'chat_sec',
@@ -151,10 +232,10 @@ describe('RepoNotifyTargetLookup', () => {
       },
       instanceRepo: { findById: (id) => id === 'bi_a' ? { id: 'bi_a', platform: 'telegram', config: { notifyAgentId: '   ' } } : INSTANCES[id] },
     });
-    expect(lookup.instanceTarget('default', 'agt_ops')).toBeUndefined();
+    expect(lookup.instanceAgentTarget('default', 'agt_ops')).toBeUndefined();
   });
 
-  it('lets an explicit `notification` binding win over the declared target agent', () => {
+  it('lets an explicit `notification` binding sink (step 2) win over the notify-agent (step 3)', () => {
     const lookup = new RepoNotifyTargetLookup({
       bindingRepo: {
         listByOrg: () => [
@@ -165,6 +246,39 @@ describe('RepoNotifyTargetLookup', () => {
       },
       instanceRepo: { findById: (id) => id === 'bi_a' ? { id: 'bi_a', platform: 'telegram', config: { notifyAgentId: 'agt_secretary' } } : INSTANCES[id] },
     });
-    expect(lookup.instanceTarget('default', 'agt_ops')?.nativeId).toBe('C_SINK');
+    expect(lookup.instanceDeclaredTarget('default', 'agt_ops')?.nativeId).toBe('C_SINK');
+    expect(lookup.instanceAgentTarget('default', 'agt_ops')?.nativeId).toBe('chat_sec');
+  });
+});
+
+describe('the walk over the real lookup (R1 end-to-end)', () => {
+  const declared = (config: Record<string, unknown>): InstanceRowLike => ({ id: 'bi_f', platform: 'feishu', config });
+
+  it('a fresh install with no bindings and no destination is `undelivered`', () => {
+    const lookup = lookupOf([]);
+    expect(resolveNotifyTarget('default', { agentId: 'agt_nobody' }, lookup)).toEqual({
+      status: 'undelivered',
+      reason: 'no-notify-target',
+    });
+  });
+
+  it('a declared destination is reached at step 2 and carries receiveIdType', () => {
+    const instance = declared({ notifyChatId: 'oc_ops' });
+    const lookup = new RepoNotifyTargetLookup({
+      bindingRepo: { listByOrg: () => [] },
+      instanceRepo: { findById: () => instance, listByOrg: () => [instance] },
+      fieldDefs: () => DECLARED_FIELDS,
+    });
+    expect(resolveNotifyTarget('default', { agentId: 'agt_nobody' }, lookup)).toEqual({
+      status: 'resolved',
+      matchedScope: 'instance',
+      target: {
+        platform: 'feishu',
+        instanceId: 'bi_f',
+        nativeId: 'oc_ops',
+        receiveIdType: 'chat_id',
+        kind: 'notification',
+      },
+    });
   });
 });

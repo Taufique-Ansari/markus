@@ -360,6 +360,10 @@ export function NotificationBell({ collapsed, userId, embeddedMode, onClose, sid
     window.addEventListener('markus:credit-exhausted', onCreditExhausted);
     const unsubNotif = wsClient.on('notification', scheduleFetch);
     const unsubApproval = wsClient.on('approval:requested', scheduleFetch);
+    // A terminal transition settled from any surface (in-app or an external IM)
+    // drops out of the pending list — refresh so the bell does not show a
+    // still-actionable approval that is already decided.
+    const unsubResolved = wsClient.on('approval:resolved', scheduleFetch);
     return () => {
       clearInterval(timer);
       if (debounceTimer) clearTimeout(debounceTimer);
@@ -369,6 +373,7 @@ export function NotificationBell({ collapsed, userId, embeddedMode, onClose, sid
       window.removeEventListener('markus:credit-exhausted', onCreditExhausted);
       unsubNotif();
       unsubApproval();
+      unsubResolved();
     };
   }, [fetchData, markReadByRef, onCreditExhausted]);
 

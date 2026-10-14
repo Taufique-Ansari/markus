@@ -1,8 +1,14 @@
 export { FeishuAdapter } from './feishu/adapter.js';
 export { FeishuClient } from './feishu/client.js';
 export type { ReceiveIdType, FeishuConfig, SendMsgType } from './feishu/client.js';
-export { buildStatusCard, buildTaskCard, buildProgressCard, buildAgentResponseCard } from './feishu/cards.js';
-export type { AgentCardPhase, ToolCallEntry } from './feishu/cards.js';
+export {
+  buildStatusCard,
+  buildTaskCard,
+  buildProgressCard,
+  buildAgentResponseCard,
+  buildNotificationCard,
+} from './feishu/cards.js';
+export type { AgentCardPhase, ToolCallEntry, NotificationCardAction } from './feishu/cards.js';
 export { WhatsAppAdapter } from './whatsapp/adapter.js';
 export { WhatsAppClient } from './whatsapp/client.js';
 export { SlackAdapter } from './slack/adapter.js';
@@ -30,11 +36,16 @@ export type {
   ConnectionTestOptions,
 } from './gateway/connection-test.js';
 export type {
+  CardResolution,
   CommAdapter,
   CommAdapterConfig,
   InboundAction,
   InboundActionHandler,
   SendOptions,
+  SendFormat,
+  SendReceiveIdType,
+  SendCard,
+  SendCardAction,
 } from './adapter.js';
 
 // Bot instance — a concrete bot on a platform (see platforms/instance.ts).
@@ -45,19 +56,33 @@ export type { BotInstance } from './platforms/instance.js';
 export {
   signActionRef,
   verifyActionRef,
+  resolveCardActionValue,
   severityOfNotification,
+  OUTBOUND_PRIORITIES,
 } from './gateway/outbound.js';
 export type {
   ActionRefPayload,
+  CardActionValue,
+  ResolvedCardAction,
   OutboundAction,
   OutboundAttachment,
   OutboundMessage,
   OutboundOrigin,
+  OutboundPriority,
   OutboundReplyRef,
   OutboundSeverity,
 } from './gateway/outbound.js';
-export { resolveNotifyTarget } from './gateway/notify-route.js';
-export type { NotifyScope, NotifyTarget, NotifyTargetLookup, ResolvedNotifyTarget } from './gateway/notify-route.js';
+export { resolveNotifyTarget, receiveIdTypeForDestination } from './gateway/notify-route.js';
+export type {
+  NotifyScope,
+  NotifyReceiveIdType,
+  NotifyDestinationKind,
+  NotifyTarget,
+  NotifyTargetLookup,
+  ResolvedNotifyTarget,
+  NotifyResolution,
+  NotifyUndeliveredReason,
+} from './gateway/notify-route.js';
 export { renderOutbound, renderCapabilitiesOf } from './gateway/render.js';
 export type { OutboundFormat, RenderCapabilities, RenderedOutbound } from './gateway/render.js';
 // Markdown → platform dialect rendering (one total function; no per-platform
@@ -74,7 +99,21 @@ export type {
   OutboundSink,
 } from './gateway/dispatcher.js';
 export { RepoNotifyTargetLookup } from './gateway/notify-lookup.js';
-export type { BindingRowLike, InstanceRowLike, RepoNotifyTargetLookupDeps } from './gateway/notify-lookup.js';
+export type { BindingRowLike, InstanceRowLike, InstanceSource, RepoNotifyTargetLookupDeps } from './gateway/notify-lookup.js';
+// Notification-preference enforcement — the one decision point for the three
+// Settings toggles (design §3 "One enforcement point", R6).
+export {
+  suppressionReasonFor,
+  parseNotifyPriority,
+  normalizePriority,
+  RepoNotifyPreferenceSource,
+} from './gateway/notify-prefs.js';
+export type {
+  NotifyPreferences,
+  NotifyPreferenceSource,
+  NotifySuppressionReason,
+  RepoNotifyPreferenceSourceDeps,
+} from './gateway/notify-prefs.js';
 export { RouterOutboundSink } from './gateway/router-sink.js';
 export type { RouterOutboundSinkDeps } from './gateway/router-sink.js';
 // Ack normalisation — one idempotent, deadline-armed handle per inbound event

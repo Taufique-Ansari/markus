@@ -249,6 +249,16 @@ function renderInstance(client: InstanceClient, opts: RenderOptions = {}) {
 const pastDebounce = () => new Promise((resolve) => setTimeout(resolve, 1200));
 
 /**
+ * A configured bot folds its credential inputs behind a "Change" toggle — the
+ * user came to *use* the bot, not retype the app secret. Editing them therefore
+ * starts by opening that fold.
+ */
+async function editCredentials(user: ReturnType<typeof userEvent.setup>, card: HTMLElement) {
+  const toggle = within(card).queryByTestId(/^instance-credentials-edit-/);
+  if (toggle) await user.click(toggle);
+}
+
+/**
  * The card's own success line — the replacement for the old "Save & test"
  * button's `integration-msg-ok`. A failed *probe* still renders
  * `integration-msg-err`; only the happy path moved into this indicator.
@@ -336,6 +346,7 @@ describe('InstanceCard — save semantics', () => {
     renderInstance(client);
 
     const card = await screen.findByTestId('instance-card-bi_fs_ready');
+    await editCredentials(user, card);
     const appId = within(card).getByTestId('integration-field-appId');
     await user.clear(appId);
     await user.type(appId, 'cli_edited');
@@ -360,6 +371,7 @@ describe('InstanceCard — save semantics', () => {
     renderInstance(client);
 
     const card = await screen.findByTestId('instance-card-bi_fs_ready');
+    await editCredentials(user, card);
     await user.clear(within(card).getByTestId('integration-field-appId'));
 
     // Saving is automatic, so "blocked" has to mean "never fires"…
@@ -376,6 +388,7 @@ describe('InstanceCard — save semantics', () => {
     renderInstance(client);
 
     const card = await screen.findByTestId('instance-card-bi_fs_ready');
+    await editCredentials(user, card);
     const appId = within(card).getByTestId('integration-field-appId');
     await user.clear(appId);
     await user.type(appId, 'cli_probe');
@@ -398,6 +411,7 @@ describe('InstanceCard — save semantics', () => {
     renderInstance(client);
 
     const card = await screen.findByTestId('instance-card-bi_fs_ready');
+    await editCredentials(user, card);
     await user.type(within(card).getByTestId('integration-field-appId'), 'X');
 
     const err = await within(card).findByTestId('integration-msg-err');
@@ -411,6 +425,7 @@ describe('InstanceCard — save semantics', () => {
     renderInstance(client);
 
     const card = await screen.findByTestId('instance-card-bi_fs_ready');
+    await editCredentials(user, card);
     await user.type(within(card).getByTestId('integration-field-appId'), 'X');
 
     const err = await within(card).findByTestId('integration-msg-err');
@@ -476,8 +491,10 @@ describe('InstanceCard — save semantics', () => {
   });
 
   it('shows the stored-secret placeholder instead of a value', async () => {
+    const user = userEvent.setup();
     renderInstance(clientStub().client);
     const card = await screen.findByTestId('instance-card-bi_fs_ready');
+    await editCredentials(user, card);
     const secret = within(card).getByTestId('integration-field-appSecret') as HTMLInputElement;
     expect(secret.value).toBe('');
     expect(secret.placeholder.length).toBeGreaterThan(0);
@@ -542,7 +559,7 @@ describe('SetupGuide', () => {
     expect(guide).toBeTruthy();
     // Steps come from the locale files, not the manifest.
     expect(within(guide).getByTestId('integration-guide-steps')).toBeTruthy();
-    expect(within(guide).getByText('Create a self-built app')).toBeTruthy();
+    expect(within(guide).getByText('Create a Feishu agent app')).toBeTruthy();
     // Feishu has a deep link to its developer console.
     expect(within(guide).getByTestId('integration-guide-console').getAttribute('href')).toContain('open.feishu.cn');
   });
@@ -580,6 +597,7 @@ describe('localisation by convention', () => {
   });
 
   it('translates field labels and the setup guide from locale files', async () => {
+    const user = userEvent.setup();
     await i18n.changeLanguage('zh-CN');
     // Nothing stored yet, so the guide is open and its localised steps are on
     // screen for the assertion below.
@@ -588,11 +606,14 @@ describe('localisation by convention', () => {
     });
 
     const card = await screen.findByTestId('instance-card-bi_fs_ready');
+    // A fresh Feishu bot opens on the guided (scan) method; this test is about
+    // the manual credential labels, so switch to that method first.
+    await user.click(within(card).getByTestId('setup-method-manual-bi_fs_ready'));
     // Field labels come from the locale files, not the manifest strings.
     expect(within(card).getAllByText('App ID').length).toBeGreaterThan(0);
     expect(within(card).getByText('App Secret')).toBeTruthy();
     // Guide content is localised too.
-    expect(within(card).getByText('创建企业自建应用')).toBeTruthy();
+    expect(within(card).getByText('创建飞书智能体应用')).toBeTruthy();
   });
 
   /**

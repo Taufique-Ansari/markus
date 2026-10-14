@@ -18,6 +18,15 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 export type OutboundSeverity = 'action_required' | 'info';
 
 /**
+ * The five notification-priority levels a message may carry — the same set the
+ * manifest's `notifyPriority` select offers. Kept distinct from
+ * {@link OutboundSeverity}: severity drives *routing and timing*, priority drives
+ * the user's *preference filter* (design §3, R6).
+ */
+export const OUTBOUND_PRIORITIES = ['low', 'normal', 'medium', 'high', 'urgent'] as const;
+export type OutboundPriority = (typeof OUTBOUND_PRIORITIES)[number];
+
+/**
  * A button on an outbound message. `ref` is a **signed, opaque token** — the
  * internal approval/entity id never travels in the clear, so a click cannot be
  * replayed against a different record and the user never sees an internal id.
@@ -40,6 +49,13 @@ export interface OutboundAttachment {
 export interface OutboundOrigin {
   agentId?: string;
   taskId?: string;
+  /**
+   * The origin agent's display name, when known. Envelope, not payload: the
+   * dispatcher resolves it from {@link agentId} and the renderer prefixes it to
+   * the message, so a notification landing in a shared group says *which agent*
+   * it came from instead of arriving anonymously.
+   */
+  agentName?: string;
 }
 
 /**
@@ -59,6 +75,12 @@ export interface OutboundMessage {
   title: string;
   body: string;
   severity: OutboundSeverity;
+  /**
+   * The message's priority level, when the source declares one. Consumed by the
+   * dispatcher's preference filter (`notifyPriority`); absent means "the source
+   * did not classify it", and the priority filter then does not narrow it.
+   */
+  priority?: OutboundPriority;
   actions?: OutboundAction[];
   attachments?: OutboundAttachment[];
   replyRef?: OutboundReplyRef;
@@ -127,6 +149,61 @@ export function verifyActionRef(token: string, secret: string): ActionRefPayload
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The `value` map a platform sends back when an interactive-card button is
+ * tapped. Field names vary: `ref`/`token` carry the gateway's reference; a
+ * platform may also post `approvalId`/`action` directly.
+ */
+export interface CardActionValue {
+  ref?: unknown;
+  token?: unknown;
+  approvalId?: unknown;
+  action?: unknown;
+}
+
+export interface ResolvedCardAction {
+  approvalId?: string;
+  command?: string;
+  /**
+   * True when the ref could not be verified but was still accepted — the bare
+   * approval-id fallback used when `MARKUS_ACTION_SECRET` is unset. Callers
+   * log this once so a real deployment notices the missing secret.
+   */
+  unverified: boolean;
+}
+
+/**
+ * Resolve an inbound card action back to `{ approvalId, command }` — the ONE
+ * reader of the ref contract that {@link signActionRef} (signed, secret set) and
+ * the dispatcher's bare-id fallback (no secret, pre-G4) write.
+ *
+ * The two halves must never disagree: whatever the gateway emitted in `ref`, a
+ * tap resolves here. When a secret is set a forged/stale ref fails *closed* (to
+ * nothing, never the wrong record); with no secret the bare id is accepted and
+ * flagged `unverified` rather than dropped — dropping it made every card tap a
+ * no-op (the 2026-10-13 Feishu "tap does nothing" defect).
+ */
+export function resolveCardActionValue(
+  value: Record<string, unknown> | undefined,
+  secret?: string,
+): ResolvedCardAction {
+  const v = value ?? {};
+  const ref =
+    typeof v['ref'] === 'string' ? (v['ref'] as string)
+      : typeof v['token'] === 'string' ? (v['token'] as string)
+        : undefined;
+
+  if (ref && secret) {
+    const verified = verifyActionRef(ref, secret);
+    if (!verified) return { unverified: false };
+    return { approvalId: verified.approvalId, command: verified.action, unverified: false };
+  }
+
+  const approvalId = typeof v['approvalId'] === 'string' ? (v['approvalId'] as string) : ref;
+  const command = typeof v['action'] === 'string' ? (v['action'] as string) : undefined;
+  return { approvalId, command, unverified: Boolean(ref) && !secret };
 }
 
 /**

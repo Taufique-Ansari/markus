@@ -585,6 +585,7 @@ function createTestServer(): TestContext {
   } as never);
   server.setHITLService({
     onNotification: vi.fn(),
+    onApprovalChanged: vi.fn(),
     listApprovals: vi.fn(() => []),
     requestApproval: vi.fn(() => ({ id: 'appr-1', status: 'pending', title: 'Test' })),
     getApproval: vi.fn(() => null),

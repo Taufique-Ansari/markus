@@ -10,6 +10,121 @@ export interface CardAction {
   value: Record<string, string>;
 }
 
+/**
+ * A button on an outbound notification card. `ref` is the **signed** action ref
+ * the gateway produced — the card carries it opaquely in the button `value`, and
+ * the inbound side (`respondToApproval`) verifies it on tap. The internal
+ * approval id never appears in the clear.
+ */
+export interface NotificationCardAction {
+  id: string;
+  label: string;
+  style?: 'primary' | 'default' | 'danger';
+  ref: string;
+}
+
+/**
+ * Build the interactive card an outbound notification/approval is rendered as
+ * (slice T2). The `notifyTarget`-annotated adaptation lives in the adapter; this
+ * is the card dialect itself: header + markdown body + one action row of
+ * buttons, each carrying its signed `ref` so a tap completes the approval.
+ *
+ * Feishu button `value` must be a flat string map; `ref` and the command id are
+ * both strings, and only `ref` is a secret (the command is not).
+ */
+export function buildNotificationCard(opts: {
+  title: string;
+  body: string;
+  actions?: NotificationCardAction[];
+}): Record<string, unknown> {
+  const elements: unknown[] = [{ tag: 'div', text: { tag: 'lark_md', content: opts.body } }];
+
+  const actions = (opts.actions ?? []).filter((a) => a.ref);
+  if (actions.length > 0) {
+    elements.push({
+      tag: 'action',
+      actions: actions.map((a) => ({
+        tag: 'button',
+        text: { tag: 'plain_text', content: a.label },
+        type: a.style ?? 'default',
+        // `ref` is verified inbound; `action` is a non-secret fallback label.
+        value: { ref: a.ref, action: a.id },
+      })),
+    });
+  }
+
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: opts.title },
+      template: 'blue',
+    },
+    elements,
+  };
+}
+
+/** Header words + colour per terminal status. */
+const RESOLVED_APPROVAL_HEADER: Record<
+  'approved' | 'rejected' | 'cancelled' | 'expired',
+  { icon: string; label: string; template: string }
+> = {
+  approved: { icon: '✅', label: '已批准', template: 'green' },
+  rejected: { icon: '❌', label: '已驳回', template: 'red' },
+  cancelled: { icon: '⚪', label: '已取消', template: 'grey' },
+  expired: { icon: '⏰', label: '已超时', template: 'grey' },
+};
+
+/** Render an ISO timestamp compactly, without pretending to know the reader's TZ. */
+function formatResolvedAt(at: string): string {
+  const iso = at.trim();
+  // `2026-10-13T11:33:25.123Z` → `2026-10-13 11:33 UTC`
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(iso);
+  return m ? `${m[1]} ${m[2]} UTC` : iso;
+}
+
+/**
+ * The card an approval turns into once it has been decided. Same header + body as
+ * the request card, **minus the action row** — the buttons are gone and a status
+ * line takes their place, so a tap leaves visible evidence instead of a card that
+ * looks untouched.
+ *
+ * Without this the tapper gets no feedback at all: an interactive card is a
+ * one-shot message, and the platform never edits it for us.
+ */
+export function buildResolvedApprovalCard(opts: {
+  title: string;
+  body: string;
+  status: 'approved' | 'rejected' | 'cancelled' | 'expired';
+  actorId?: string;
+  actorName?: string;
+  selectedOption?: string;
+  at?: string;
+}): Record<string, unknown> {
+  const head = RESOLVED_APPROVAL_HEADER[opts.status];
+  const facts: string[] = [`**${head.icon} ${head.label}**`];
+  // A named option carries more than approve/reject — surface what was chosen.
+  if (opts.selectedOption && opts.selectedOption !== 'approve' && opts.selectedOption !== 'reject') {
+    facts.push(`选项：\`${opts.selectedOption}\``);
+  }
+  // Prefer the resolved display name; fall back to the raw id (always correct).
+  const actor = opts.actorName || opts.actorId;
+  if (actor) facts.push(`操作人：${actor}`);
+  if (opts.at) facts.push(`时间：${formatResolvedAt(opts.at)}`);
+
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: { tag: 'plain_text', content: opts.title },
+      template: head.template,
+    },
+    elements: [
+      { tag: 'div', text: { tag: 'lark_md', content: opts.body } },
+      { tag: 'hr' },
+      { tag: 'div', text: { tag: 'lark_md', content: facts.join('\n') } },
+    ],
+  };
+}
+
 export function buildStatusCard(opts: {
   agentName: string;
   title: string;
