@@ -5423,6 +5423,14 @@ export class Agent {
       this.activeStreamToken = cancelToken;
     }
 
+    // Per-turn reset (mirrors handleMessage): the end_turn signal never carries
+    // over between turns. Streaming turns previously missed this reset, so after
+    // a chat ended via end_turn, the NEXT streaming turn's first tool_use
+    // response skipped the whole tool loop (shouldContinueToolLoop sees the
+    // stale flag) and resolved empty — which attention then dropped without
+    // retry for human_chat items (silent reply loss, 2026-10-13).
+    this.endTurnRequested = false;
+
     // Early bail-out: only if the *user* explicitly stopped (not an SSE disconnect).
     // SSE disconnects set `cancelled` but not `userStopped`; in that case we
     // continue processing so the instruction isn't lost — the SSE handler's

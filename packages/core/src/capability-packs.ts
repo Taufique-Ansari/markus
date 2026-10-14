@@ -37,7 +37,44 @@ export const CONVERSE_FORBIDDEN_DEFAULT = new Set([
   'deliverable_create',
 ]);
 
-/** Tools that must never be evicted for budget. */
+/**
+ * Work-entity (**task / subtask**) lifecycle tools — the tools that close the
+ * task-execution / task-review state machine.
+ *
+ * `task_submit_review` ends a task execution (the round is NOT complete without
+ * it) and the submission is *rejected* while any subtask is still `pending` —
+ * which is why create/complete/cancel are in here too. These names appear ONLY
+ * inside an entity-bound session ({@link allowsWorkContextBoundTools} gates them
+ * out of plain chat / a2a / reflex), so protecting them can never leak them into
+ * an unrelated schema.
+ *
+ * **SINGLE SOURCE** — the lifecycle tools are declared exactly once, here:
+ *   • {@link TOOL_DEF_PROTECTED} spreads this set → eviction-immune (tier 0).
+ *   • {@link EXECUTE_SESSION_ONLY_TOOLS} aliases it → session-gated.
+ *
+ * **Why they must be protected (2026-10-13 incident).** The task-execution
+ * prompt *mandates* `task_submit_review`. It was selected by ToolSelector but
+ * was in neither TOOL_DEF_PROTECTED nor TOOL_DEF_CORE_KEEP, so its eviction
+ * tier was 2 (ordinary builtin) and budget pressure dropped it from the schema.
+ * The model was then ordered to call a tool it did not have → the turn ended
+ * "without task_submit_review" → the platform auto-retried the whole execution
+ * (observed: `Task execution finished without task_submit_review — auto-retrying`,
+ * and 53/88 task LLM calls shipped a schema with no `task_submit_review`).
+ *
+ * INVARIANT: a tool the runtime's prompt/flow *requires* the model to call must
+ * never be evicted by the "largest schema loses" budget evictor.
+ */
+export const WORK_ENTITY_LIFECYCLE_TOOLS = new Set([
+  'task_submit_review',
+  'task_note',
+  'task_assign',
+  'subtask_create',
+  'subtask_complete',
+  'subtask_cancel',
+  'subtask_list',
+]);
+
+/** Tools that must never be evicted for budget (eviction tier 0). */
 export const TOOL_DEF_PROTECTED = new Set([
   'discover_tools',
   'notify_user',
@@ -51,6 +88,10 @@ export const TOOL_DEF_PROTECTED = new Set([
   // Schema is tiny (one optional string), so protection is effectively free.
   // Listing it here also propagates to TOOL_DEF_CORE_KEEP and the reflex allowlist.
   'end_turn',
+  // Work-entity lifecycle — same hazard class as `end_turn` above, but for the
+  // task-execution state machine instead of the DM/comment loop. See
+  // WORK_ENTITY_LIFECYCLE_TOOLS.
+  ...WORK_ENTITY_LIFECYCLE_TOOLS,
 ]);
 
 /**
@@ -178,16 +219,12 @@ export function toolEvictionTier(
  * (`comment_response`, `requirement_action`, `workflow_action`).
  * Must NOT sticky into plain `chat` / `a2a` / `group_chat` / reflex — that
  * caused "No active task" when `task_submit_review` leaked without ALS.
+ *
+ * Same members as {@link WORK_ENTITY_LIFECYCLE_TOOLS} (declared once there) —
+ * this alias keeps the two concerns (session-gating here, eviction- immunity
+ * there) reading from a single source.
  */
-export const EXECUTE_SESSION_ONLY_TOOLS = new Set([
-  'task_submit_review',
-  'task_note',
-  'task_assign',
-  'subtask_create',
-  'subtask_complete',
-  'subtask_cancel',
-  'subtask_list',
-]);
+export const EXECUTE_SESSION_ONLY_TOOLS = WORK_ENTITY_LIFECYCLE_TOOLS;
 
 /** @deprecated Alias — prefer {@link isWorkContextBoundTool}. */
 export function isExecuteSessionOnlyTool(name: string): boolean {
