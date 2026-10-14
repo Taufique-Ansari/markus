@@ -105,6 +105,14 @@ export interface InstanceStatus {
   /** True when the manifest exposes `listChannels` — drives the channel picker. */
   canListChannels: boolean;
   /**
+   * Guidance copy (an i18n key) for platforms whose API genuinely cannot
+   * enumerate conversations — lets the picker say *what to do* instead of a
+   * bare "unsupported". `null` when the platform can enumerate (nothing to
+   * explain). Sourced from the manifest's `channelEnumerationGuidance`, so it
+   * never disagrees with `canListChannels`.
+   */
+  channelsGuidance: string | null;
+  /**
    * When this bot last passed the two-way handshake, or `null` if it never has.
    *
    * A fact about the bot, not about one pending run, so it survives a reload.
@@ -324,6 +332,7 @@ function buildInstanceStatus(deps: InstanceStoreDeps, instance: PlatformInstance
       channels: channelsFor(deps, instance.id),
       lastError: instance.lastError,
       canListChannels: false,
+      channelsGuidance: null,
       lastVerifiedAt: instance.lastVerifiedAt,
     };
   }
@@ -368,6 +377,7 @@ function buildInstanceStatus(deps: InstanceStoreDeps, instance: PlatformInstance
     channels: channelsFor(deps, instance.id),
     lastError: instance.lastError,
     canListChannels: manifest.listChannels !== undefined,
+    channelsGuidance: manifest.channelEnumerationGuidance ?? null,
     lastVerifiedAt: instance.lastVerifiedAt,
   };
 }

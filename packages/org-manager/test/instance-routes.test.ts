@@ -233,6 +233,16 @@ describe('Bot instance API', () => {
       expect(body.instances[0]!['platform']).toBe('feishu');
       expect(body.instances[0]!['label']).toBe('sales');
       expect(body.instances[0]!['canListChannels']).toBe(true);
+      // A platform that CAN enumerate needs no guidance.
+      expect(body.instances[0]!['channelsGuidance']).toBeNull();
+    });
+
+    it('carries the manifest guidance for a platform that cannot enumerate', async () => {
+      await createInstance('telegram', 'ops');
+      const res = await fetch(url('/api/settings/integrations/instances'), { headers });
+      const body = (await res.json()) as { instances: Array<Record<string, unknown>> };
+      expect(body.instances[0]!['canListChannels']).toBe(false);
+      expect(body.instances[0]!['channelsGuidance']).toBe('settings:instances.routing.guidance.telegram');
     });
   });
 
@@ -381,7 +391,13 @@ describe('Bot instance API', () => {
       const id = await createInstance('telegram', 'ui');
       const res = await fetch(url(`/api/settings/integrations/instances/${id}/channels`), { headers });
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ supported: false, channels: [] });
+      // Not silent: the manifest's guidance (i18n key) rides along so the UI can
+      // explain how to configure the destination by hand.
+      expect(await res.json()).toEqual({
+        supported: false,
+        channels: [],
+        guidance: 'settings:instances.routing.guidance.telegram',
+      });
     });
 
     it('never 500s when the platform call fails — reports the error instead', async () => {

@@ -30,6 +30,7 @@
  */
 
 import type { CommAdapter } from '../adapter.js';
+import type { NotifyDestinationKind } from '../gateway/notify-route.js';
 import { FeishuAdapter } from '../feishu/adapter.js';
 import { FeishuClient } from '../feishu/client.js';
 import { TelegramAdapter } from '../telegram/adapter.js';
@@ -82,6 +83,19 @@ export interface PlatformField {
   multiple?: boolean;
   /** Value the settings form starts from when nothing is stored yet. */
   default?: string | number | boolean | string[];
+  /**
+   * Declares this field as a **notification destination** and its semantic kind.
+   *
+   * The resolver scans an instance's config for fields carrying this annotation
+   * (see `RepoNotifyTargetLookup.instanceDeclaredTarget`) — so "point
+   * notifications at a chat / a user" is expressed by *data on the manifest*, not
+   * a `if (platform === …)` branch anywhere in the gateway (fixes R5). It is also
+   * what makes a destination reachable without any agent binding (fixes R1).
+   *
+   * The value is the platform-neutral kind (`chat` = channel/group, `user` = a
+   * person); the concrete wire receive-id type is derived from it.
+   */
+  notifyTarget?: NotifyDestinationKind;
 }
 
 /** How inbound traffic reaches us. */
@@ -248,6 +262,21 @@ export interface PlatformManifest {
    * Absent means "off until the user enables it", i.e. `false`.
    */
   defaultEnabled?: boolean;
+  /**
+   * Not offered to users in a production build — shown only in development.
+   *
+   * A platform is marked dev-only while its adapter exists and is unit-tested
+   * but has **not** been verified end to end against the live service (no
+   * public URL / no real credentials on a desktop install). Offering it to
+   * production users would present an integration we cannot honestly claim
+   * works.
+   *
+   * This is a **presentation** gate, not a capability gate: the manifest, the
+   * adapter and the API are all unchanged, so a build can be verified in dev
+   * and the flag flipped without touching anything else. The one reader is the
+   * Settings UI (`visiblePlatformIds`), driven by `import.meta.env.DEV`.
+   */
+  devOnly?: boolean;
   createAdapter(): CommAdapter;
   testConnection?(config: Record<string, unknown>): Promise<TestConnectionResult>;
   /**
@@ -258,6 +287,20 @@ export interface PlatformManifest {
    * an error the caller must surface as such, never as "no channels".
    */
   listChannels?(config: Record<string, unknown>): Promise<PlatformChannel[]>;
+  /**
+   * Guidance shown when this platform's API genuinely cannot enumerate the
+   * conversations a bot can reach.
+   *
+   * Declared **only by platforms that leave `listChannels` unimplemented** so
+   * the Settings UI can tell the user *what to do* (e.g. "add the bot to a
+   * group, then paste the chat id") instead of the bare "unsupported" string.
+   *
+   * Deliberately *not* a capability flag: enumerability has exactly one source —
+   * the presence of `listChannels` (see `canListChannels`) — so this text can
+   * never disagree with it. It is additive copy, an i18n key resolved by the
+   * client, not a second writer of "can list / cannot list".
+   */
+  channelEnumerationGuidance?: string;
 }
 
 // ─── Manifests ───────────────────────────────────────────────────────────────
@@ -278,6 +321,28 @@ export const AGENT_BINDING_FIELD: PlatformField = {
   help:
     'Agent that answers inbound messages from this platform. The instance is ' +
     'created bound to the org secretary; re-point it here or per channel.',
+};
+
+/**
+ * The notification **master switch** — one field that turns all outbound
+ * forwarding off for an instance, declared the same way for every platform.
+ *
+ * It is a real manifest field, not a UI-only convenience, so the switch has a
+ * single writer (the instance config) and a single enforcement point (the
+ * dispatcher's `suppressionReasonFor`, which reads it from the same config the
+ * destination comes from). A toggle that merely dimmed the panel would be a
+ * second source of truth — the classic "the UI says off, delivery says on".
+ *
+ * Default `true`: an install that never touched it keeps forwarding exactly as
+ * before. Placed before the destination field so the master reads first.
+ */
+export const NOTIFY_MASTER_FIELD: PlatformField = {
+  key: 'notifyEnabled',
+  label: 'Notifications',
+  type: 'boolean',
+  required: false,
+  default: true,
+  help: 'Deliver this bot’s approvals and notifications to the destination below.',
 };
 
 /**
@@ -338,20 +403,27 @@ const FEISHU_MANIFEST: PlatformManifest = {
       secret: true,
       help: 'Event-subscription verification token.',
     },
+    // Declared notification destination (design §3, "Generic destination
+    // declaration"). Annotated with `notifyTarget` so the resolver finds it by
+    // scanning the manifest — no platform branch (fixes R5). This is the
+    // pre-existing Feishu key (`notifyChatId`), so a config written before this
+    // annotation existed keeps resolving — the key-migration guarantee. Optional
+    // on purpose: a destination must never gate "connected".
+    //
+    // A **group** is the only destination: approvals and notifications are posted
+    // into a chat the bot was added to, never DM'd to one person. The old
+    // `notifyOpenId` ("send to my Feishu") destination is gone — a bot addressing
+    // a single person is not a notification channel, and it is the reason a bot
+    // with no group silently counted as "configured".
     {
       key: 'notifyChatId',
       label: 'Default chat ID',
       type: 'text',
       required: false,
-      help: 'Group chat_id used when sending notifications.',
+      notifyTarget: 'chat',
+      help: 'Group chat_id that approvals and notifications are delivered to.',
     },
-    {
-      key: 'notifyOpenId',
-      label: 'Default open ID',
-      type: 'text',
-      required: false,
-      help: 'User open_id used for direct ("send to my Feishu") messages.',
-    },
+    NOTIFY_MASTER_FIELD,
     // Notification preferences. These existed as config surface before the
     // manifest programme (the pre-manifest Settings API read/wrote them through
     // POST /settings/integrations/feishu) but were missing from the manifest,
@@ -478,6 +550,17 @@ const TELEGRAM_MANIFEST: PlatformManifest = {
       placeholder: '123456:ABC-DEF…',
       help: 'Token from @BotFather. Verified with getMe when the adapter connects.',
     },
+    // Declared notification destinations (design §3). See the Feishu note above:
+    // annotated so the resolver finds them without a platform branch (fixes R5).
+    {
+      key: 'notifyChatId',
+      label: 'Notification chat ID',
+      type: 'text',
+      required: false,
+      notifyTarget: 'chat',
+      help: 'Telegram chat id (group or channel) that approvals and notifications are delivered to.',
+    },
+    NOTIFY_MASTER_FIELD,
     AGENT_BINDING_FIELD,
     {
       key: 'apiUrl',
@@ -553,6 +636,10 @@ const TELEGRAM_MANIFEST: PlatformManifest = {
       return probeError(error);
     }
   },
+  // Telegram's Bot API cannot list the groups a bot belongs to (no
+  // `getChats`-style call exists), so there is nothing to enumerate — this is
+  // how the user finds the id instead.
+  channelEnumerationGuidance: 'settings:instances.routing.guidance.telegram',
 };
 
 /**
@@ -567,6 +654,7 @@ const SLACK_MANIFEST: PlatformManifest = {
   id: 'slack',
   label: 'Slack',
   docsUrl: 'https://api.slack.com/authentication',
+  devOnly: true,
   fields: [
     {
       key: 'botToken',
@@ -577,6 +665,16 @@ const SLACK_MANIFEST: PlatformManifest = {
       placeholder: 'xoxb-…',
       help: 'Verified with auth.test when the adapter connects.',
     },
+    // Declared notification destinations (design §3). See the Feishu note above.
+    {
+      key: 'notifyChannelId',
+      label: 'Notification channel',
+      type: 'text',
+      required: false,
+      notifyTarget: 'chat',
+      help: 'Slack channel id (e.g. C0123456789) that approvals and notifications are delivered to.',
+    },
+    NOTIFY_MASTER_FIELD,
     AGENT_BINDING_FIELD,
     {
       key: 'signingSecret',
@@ -654,6 +752,73 @@ const SLACK_MANIFEST: PlatformManifest = {
       return probeError(error);
     }
   },
+  /**
+   * Channels this Slack bot can actually serve.
+   *
+   * `conversations.list` with `types=public_channel,private_channel` returns
+   * every conversation the token is allowed to see, but a bot can only *route*
+   * a conversation it is a **member** of (Slack rejects `chat.postMessage` to a
+   * channel the app has not joined: `not_in_channel`), so the list is filtered
+   * to `is_member === true`. That is exactly "add the bot to the channel, then
+   * refresh" — the user flow this picker exists for, and the same set the
+   * gateway can deliver to.
+   *
+   * Raw items are mapped here rather than passed through, so the wire contract
+   * stays {@link PlatformChannel} and a Slack API change cannot reach a Settings
+   * client. Missing credentials *throw* — "cannot list" must not be
+   * indistinguishable from "no channels exist".
+   */
+  async listChannels(config) {
+    const botToken = typeof config['botToken'] === 'string' ? config['botToken'].trim() : '';
+    if (!botToken) {
+      throw new Error('botToken is required to list channels');
+    }
+    const rawApi = config['apiUrl'];
+    const base =
+      typeof rawApi === 'string' && rawApi.trim() ? rawApi.trim().replace(/\/+$/, '') : 'https://slack.com/api';
+
+    const channels: PlatformChannel[] = [];
+    let cursor: string | undefined;
+    // Slack paginates with an opaque cursor; cap the walk so a misbehaving
+    // server can never loop this forever.
+    for (let page = 0; page < 20; page += 1) {
+      const body: Record<string, unknown> = {
+        types: 'public_channel,private_channel',
+        exclude_archived: true,
+        limit: 200,
+      };
+      if (cursor) body['cursor'] = cursor;
+      const res = await httpFetch(`${base}/conversations.list`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${botToken}`,
+          'Content-Type': 'application/json; charset=utf-8',
+        },
+        body: JSON.stringify(body),
+      });
+      const payload = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        channels?: unknown;
+        response_metadata?: { next_cursor?: unknown };
+      };
+      if (payload.ok !== true) {
+        throw new Error(`Slack API error: ${payload.error ?? `HTTP ${res.status}`}`);
+      }
+      const items = Array.isArray(payload.channels) ? payload.channels : [];
+      for (const item of items) {
+        const row = item && typeof item === 'object' ? (item as Record<string, unknown>) : {};
+        if (row['is_member'] !== true) continue;
+        const id = typeof row['id'] === 'string' ? row['id'] : '';
+        if (!id) continue;
+        channels.push({ id, name: typeof row['name'] === 'string' ? row['name'] : '', kind: 'channel' });
+      }
+      const next = payload.response_metadata?.next_cursor;
+      cursor = typeof next === 'string' && next ? next : undefined;
+      if (!cursor) break;
+    }
+    return channels;
+  },
 };
 
 /**
@@ -665,6 +830,7 @@ const WHATSAPP_MANIFEST: PlatformManifest = {
   id: 'whatsapp',
   label: 'WhatsApp',
   docsUrl: 'https://developers.facebook.com/docs/whatsapp/cloud-api',
+  devOnly: true,
   fields: [
     {
       key: 'phoneNumberId',
@@ -682,6 +848,17 @@ const WHATSAPP_MANIFEST: PlatformManifest = {
       secret: true,
       help: 'Cloud API access token. The API Setup temporary token (~24h) is fine for testing; use a permanent system-user token in production.',
     },
+    // Declared notification destination (design §3). WhatsApp addresses a
+    // recipient by `wa_id` (a phone number), i.e. a `user` destination.
+    {
+      key: 'notifyWaId',
+      label: 'Notification WhatsApp ID',
+      type: 'text',
+      required: false,
+      notifyTarget: 'user',
+      help: 'Recipient wa_id (phone number in international format) for approvals and notifications.',
+    },
+    NOTIFY_MASTER_FIELD,
     AGENT_BINDING_FIELD,
     {
       key: 'businessAccountId',
@@ -746,6 +923,11 @@ const WHATSAPP_MANIFEST: PlatformManifest = {
   // No lightweight credential probe: Meta exposes no "me for this token" call
   // that is safe to run for an arbitrary Cloud API token. Reported honestly as
   // unsupported by the Settings API rather than faking success.
+  //
+  // The Cloud API likewise cannot list the WhatsApp groups a business number is
+  // in (groups are a client feature, not a Cloud API resource), so destination
+  // setup is manual — this points the user at how.
+  channelEnumerationGuidance: 'settings:instances.routing.guidance.whatsapp',
 };
 
 /**
@@ -757,6 +939,7 @@ const DISCORD_MANIFEST: PlatformManifest = {
   id: 'discord',
   label: 'Discord',
   docsUrl: 'https://discord.com/developers/docs/intro',
+  devOnly: true,
   fields: [
     {
       key: 'botToken',
@@ -766,6 +949,16 @@ const DISCORD_MANIFEST: PlatformManifest = {
       secret: true,
       help: 'Bot token from the Discord developer portal.',
     },
+    // Declared notification destinations (design §3). See the Feishu note above.
+    {
+      key: 'notifyChannelId',
+      label: 'Notification channel',
+      type: 'text',
+      required: false,
+      notifyTarget: 'chat',
+      help: 'Discord channel id that approvals and notifications are delivered to.',
+    },
+    NOTIFY_MASTER_FIELD,
     AGENT_BINDING_FIELD,
     {
       key: 'apiUrl',
@@ -805,6 +998,56 @@ const DISCORD_MANIFEST: PlatformManifest = {
     } catch (error) {
       return probeError(error);
     }
+  },
+  /**
+   * Text channels a Discord bot can post to.
+   *
+   * A bot's reachable conversations are scoped to the guilds it has joined, so
+   * the walk is `GET /users/@me/guilds` (bot's guilds) → `GET
+   * /guilds/{id}/channels` (that guild's channels) → keep `type === 0`
+   * (`GUILD_TEXT`). Voice/category/forum channels are not destinations a
+   * notification can land in, so they are dropped. Channel names are only
+   * unique *within* a guild, so the label is prefixed with the guild name —
+   * two `#general` chips would otherwise be indistinguishable.
+   *
+   * Raw items are mapped here rather than passed through, so the wire contract
+   * stays {@link PlatformChannel}. Missing credentials *throw* — "cannot list"
+   * must not be indistinguishable from "no channels exist".
+   */
+  async listChannels(config) {
+    const botToken = typeof config['botToken'] === 'string' ? config['botToken'].trim() : '';
+    if (!botToken) {
+      throw new Error('botToken is required to list channels');
+    }
+    const rawApi = config['apiUrl'];
+    const base =
+      typeof rawApi === 'string' && rawApi.trim() ? rawApi.trim().replace(/\/+$/, '') : 'https://discord.com/api/v10';
+    const get = async (path: string): Promise<unknown> => {
+      const res = await httpFetch(`${base}${path}`, { headers: { Authorization: `Bot ${botToken}` } });
+      if (!res.ok) throw new Error(`Discord API error: ${res.status}`);
+      return res.json();
+    };
+
+    const guildsRaw = await get('/users/@me/guilds');
+    const guilds = Array.isArray(guildsRaw) ? guildsRaw : [];
+    const channels: PlatformChannel[] = [];
+    for (const guildItem of guilds) {
+      const guild = guildItem && typeof guildItem === 'object' ? (guildItem as Record<string, unknown>) : {};
+      const guildId = typeof guild['id'] === 'string' ? guild['id'] : '';
+      if (!guildId) continue;
+      const guildName = typeof guild['name'] === 'string' ? guild['name'] : guildId;
+      const listRaw = await get(`/guilds/${guildId}/channels`);
+      const list = Array.isArray(listRaw) ? listRaw : [];
+      for (const channelItem of list) {
+        const channel = channelItem && typeof channelItem === 'object' ? (channelItem as Record<string, unknown>) : {};
+        if (channel['type'] !== 0) continue; // 0 = GUILD_TEXT
+        const id = typeof channel['id'] === 'string' ? channel['id'] : '';
+        if (!id) continue;
+        const name = typeof channel['name'] === 'string' ? channel['name'] : '';
+        channels.push({ id, name: `${guildName} / #${name}`, kind: 'channel' });
+      }
+    }
+    return channels;
   },
 };
 

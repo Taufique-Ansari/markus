@@ -454,6 +454,7 @@ export function createTestServer(): TestContext {
   server.setAuditService({ record: vi.fn(), query: vi.fn(() => []), summary: vi.fn(() => ({ total: 0, byType: {} })), getSummary: vi.fn(() => ({ total: 0 })), getTokenUsage: vi.fn(() => []) } as never);
   server.setHITLService({
     onNotification: vi.fn(),
+    onApprovalChanged: vi.fn(),
     listApprovals: vi.fn(() => []),
     requestApproval: vi.fn(() => ({ id: 'appr-1', status: 'pending', title: 'Test' })),
     getApproval: vi.fn((id: string) => id === 'appr-pending' ? {

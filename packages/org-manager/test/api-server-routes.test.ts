@@ -519,6 +519,7 @@ describe('APIServer targeted route coverage', () => {
       const server = createTestServer().server;
       server.setHITLService({
         onNotification,
+        onApprovalChanged: vi.fn(),
         listApprovals: vi.fn(() => []),
         requestApproval: vi.fn(),
         getApproval: vi.fn(),

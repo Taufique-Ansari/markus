@@ -183,6 +183,29 @@ export class HITLService {
     (result: { approved: boolean; comment?: string; selectedOption?: string; answers?: UserInputAnswer[]; respondedBy?: string }) => void
   >();
   private notificationHandlers: NotificationHandler[] = [];
+  /**
+   * Channel-level consumers — the outbound gateway. Deliberately a **separate**
+   * list from {@link notificationHandlers}: the two answer different questions.
+   * "Who should see this in their bell" is per *person* (N emissions for
+   * `targetUserId:'all'`); "one channel message per logical notification" is per
+   * *channel* (exactly one). Sharing one list is the granularity confusion that
+   * made a single notification reach a Feishu group N times (req_d25dc9b9).
+   */
+  private channelNotificationHandlers: NotificationHandler[] = [];
+  /**
+   * Approval-lifecycle consumers. A terminal transition (approved / rejected /
+   * cancelled / expired) is a change to authoritative state that **every**
+   * derived surface must observe — the in-app chat banner, the bell, any other
+   * client. Deliberately separate from the notification streams: notifications
+   * answer "tell this person", this one answers "the state changed".
+   *
+   * The emission lives at the transition itself (not at each call site) because
+   * a decision can be written from ≥3 places — the HTTP API, the in-process
+   * platform-action path, and the expiry timer. Wiring only the HTTP path is
+   * exactly how the chat banner used to linger forever after an approval was
+   * settled from Feishu (the resolving surface was not the one polling).
+   */
+  private approvalChangeHandlers: Array<(approval: ApprovalRequest) => void> = [];
   private notificationRepo?: NotificationRepo;
   private approvalRepo?: ApprovalRepo;
   private orgService?: OrganizationService;
@@ -241,6 +264,11 @@ export class HITLService {
     }
   }
 
+  /**
+   * Per-person stream. Fires **once per human recipient** — `targetUserId:'all'`
+   * fans out to N emissions by design (the in-app bell / WS push is per person).
+   * Consumers that address a concrete user subscribe here.
+   */
   onNotification(handler: NotificationHandler): () => void {
     this.notificationHandlers.push(handler);
     return () => {
@@ -249,9 +277,50 @@ export class HITLService {
     };
   }
 
+  /**
+   * Channel-level stream — the single granularity the outbound gateway needs:
+   * fires **exactly once per `notify()` call**, no matter how many humans the
+   * notification fans out to. This is what structurally guarantees "one logical
+   * notification ⇒ one channel message", instead of leaving the dispatcher to
+   * de-duplicate N per-person emissions (req_d25dc9b9).
+   */
+  onChannelNotification(handler: NotificationHandler): () => void {
+    this.channelNotificationHandlers.push(handler);
+    return () => {
+      const idx = this.channelNotificationHandlers.indexOf(handler);
+      if (idx >= 0) this.channelNotificationHandlers.splice(idx, 1);
+    };
+  }
+
+  /**
+   * Approval-lifecycle stream. Fires exactly once per terminal transition,
+   * whichever surface caused it (in-app modal, Feishu card tap, expiry timer).
+   * Consumers invalidate their derived views from this — that is what makes an
+   * approval decided in an external IM disappear from the in-app banner too.
+   */
+  onApprovalChanged(handler: (approval: ApprovalRequest) => void): () => void {
+    this.approvalChangeHandlers.push(handler);
+    return () => {
+      const idx = this.approvalChangeHandlers.indexOf(handler);
+      if (idx >= 0) this.approvalChangeHandlers.splice(idx, 1);
+    };
+  }
+
   private emit(n: Notification): void {
     for (const h of this.notificationHandlers) {
       try { h(n); } catch { /* ignore */ }
+    }
+  }
+
+  private emitChannel(n: Notification): void {
+    for (const h of this.channelNotificationHandlers) {
+      try { h(n); } catch { /* ignore */ }
+    }
+  }
+
+  private emitApprovalChanged(approval: ApprovalRequest): void {
+    for (const h of this.approvalChangeHandlers) {
+      try { h(approval); } catch { /* ignore */ }
     }
   }
 
@@ -337,6 +406,7 @@ export class HITLService {
               a.responseComment = 'Approval timed out';
               this.persistApproval(a);
               this.markApprovalNotificationsRead(a.id);
+              this.emitApprovalChanged(a);
             }
             resolve({ approved: false, comment: 'Approval timed out' });
           }
@@ -359,6 +429,7 @@ export class HITLService {
     log.info(`Approval ${id} ${approval.status} by ${respondedBy}`, { comment, selectedOption, answerCount: answers?.length ?? 0 });
 
     this.markApprovalNotificationsRead(id);
+    this.emitApprovalChanged(approval);
 
     const resolve = this.pendingResolvers.get(id);
     if (resolve) {
@@ -380,6 +451,7 @@ export class HITLService {
     log.info(`Approval ${id} cancelled by ${cancelledBy}`, { comment });
 
     this.markApprovalNotificationsRead(id);
+    this.emitApprovalChanged(approval);
 
     const resolve = this.pendingResolvers.get(id);
     if (resolve) {
@@ -504,10 +576,21 @@ export class HITLService {
       const n = this.notifySingle({ ...opts, targetUserId });
       first ??= n;
     }
+
+    // Channel-level stream: exactly ONE logical event per notify() call, for
+    // consumers that address a *channel* rather than a person (the outbound
+    // gateway). Emitted from the single source, so it is independent of the
+    // per-person fan-out above (req_d25dc9b9).
+    this.emitChannel(this.buildNotification({ ...opts }));
+
     return first!;
   }
 
-  private notifySingle(opts: {
+  /**
+   * Assemble the notification shape — the **single** place the fields are built,
+   * shared by the persisted per-person row and the logical channel event.
+   */
+  private buildNotification(opts: {
     targetUserId: string;
     type: NotificationType;
     title: string;
@@ -517,7 +600,7 @@ export class HITLService {
     actionTarget?: string;
     metadata?: Record<string, unknown>;
   }): Notification {
-    const notification: Notification = {
+    return {
       id: genId('ntf'),
       targetUserId: opts.targetUserId,
       type: opts.type,
@@ -530,6 +613,19 @@ export class HITLService {
       createdAt: new Date().toISOString(),
       metadata: opts.metadata,
     };
+  }
+
+  private notifySingle(opts: {
+    targetUserId: string;
+    type: NotificationType;
+    title: string;
+    body: string;
+    priority?: NotificationPriority;
+    actionType?: NotificationActionType;
+    actionTarget?: string;
+    metadata?: Record<string, unknown>;
+  }): Notification {
+    const notification = this.buildNotification(opts);
 
     if (this.notificationRepo) {
       try {

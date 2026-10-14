@@ -850,6 +850,14 @@
     "guide": {
       "heading": "接入步骤",
       "openConsole": "打开开发者后台",
+      "destinationStep": {
+        "title": "设置通知目的地",
+        "desc": "选择接收审批与通知的群聊或用户——不设置它们就无处可去。"
+      },
+      "selectChatStep": {
+        "title": "选择通知群",
+        "desc": "在 IM 里把机器人拉进群 → 点「加载群组」→ 从列表里选择。"
+      },
       "fallback": "请按下方说明，从对应平台的开发者后台获取凭证并填入。"
     },
     "platforms": {
@@ -873,8 +881,8 @@
         "description": "接入飞书，接收消息并转发通知与审批请求。",
         "guide": {
           "step1": {
-            "title": "创建企业自建应用",
-            "desc": "扫描下方二维码可一键创建，也可前往飞书开放平台手动创建应用。"
+            "title": "创建飞书智能体应用",
+            "desc": "新建机器人时，点击「扫码创建应用」生成二维码，用飞书扫一扫即可一键创建（机器人、权限与事件订阅会自动配置好）；也可在飞书开放平台创建「智能体应用」后手动填入凭证。"
           },
           "step2": { "title": "启用机器人", "desc": "应用 → 应用功能 → 机器人，开启机器人能力。" },
           "step3": { "title": "开通权限", "desc": "应用 → 权限管理，开通 im:message 与 im:message.receive_v1。" },
@@ -889,6 +897,7 @@
           "webhookPort": { "label": "Webhook 端口", "help": "关闭 WebSocket 模式时，webhook 服务监听的端口。" },
           "encryptKey": { "label": "Encrypt Key", "help": "用于解密加密 webhook 载荷的 AES 密钥。" },
           "verificationToken": { "label": "Verification Token", "help": "事件订阅的校验 Token。" },
+          "notifyEnabled": { "label": "通知", "help": "把该机器人的审批与通知投递到下方配置的目的地。" },
           "notifyChatId": { "label": "默认群聊", "help": "接收通知的群聊。留空则使用私信。" },
           "notifyOpenId": { "label": "默认用户", "help": "用于私信（「发到我的飞书」）的用户 open_id。" },
           "notifyOnApproval": { "label": "审批请求通知", "help": "将审批请求转发到上方群聊 / 用户。" },
@@ -913,11 +922,14 @@
         "fields": {
           "botToken": { "label": "Bot Token", "placeholder": "123456:ABC-DEF…", "help": "来自 @BotFather 的 Token。适配器连接时用 getMe 校验。" },
           "agentId": { "label": "绑定 Agent", "help": "应答入站消息的 Agent。留空则需按通道显式绑定。", "placeholder": "agt_…" },
-          "apiUrl": { "label": "API 地址", "help": "自建 Bot API 服务时的覆盖地址。" },
+          "apiUrl": { "label": "API 地址", "help": "自建 Bot API 服务时的覆盖地址。", "placeholder": "https://api.telegram.org" },
+          "notifyEnabled": { "label": "通知", "help": "把该机器人的审批与通知投递到下方配置的目的地。" },
+          "notifyChatId": { "label": "通知群 ID", "help": "接收审批与通知的 Telegram 群或频道 ID。" },
           "pollingEnabled": { "label": "长轮询", "help": "用轮询接收更新，替代 webhook（无需公网地址）。" },
           "webhookPort": { "label": "Webhook 端口", "help": "webhook 服务监听的本地端口。留空则不启用入站 webhook。" },
           "webhookSecret": { "label": "Webhook 密钥", "help": "作为 webhook 密钥 Token 发送给 Telegram，并在每次更新时校验。" },
-          "webhookPath": { "label": "Webhook 路径" }
+          "webhookPath": { "label": "Webhook 路径" },
+          "webhookUrl": { "label": "公网 Webhook 地址", "help": "Telegram 需要一个可公网访问的 HTTPS 地址来回调；仅当关闭长轮询时才需要。", "placeholder": "https://example.com/webhook/telegram" }
         }
       },
       "slack": {
@@ -938,7 +950,9 @@
           "socketMode": { "label": "Socket Mode" },
           "webhookPort": { "label": "Webhook 端口", "help": "webhook 服务监听的本地端口。留空则不启用入站 webhook。" },
           "webhookPath": { "label": "Webhook 路径" },
-          "apiUrl": { "label": "API 地址" }
+          "apiUrl": { "label": "API 地址", "placeholder": "https://slack.com/api" },
+          "notifyEnabled": { "label": "通知", "help": "把该机器人的审批与通知投递到下方配置的目的地。" },
+          "notifyChannelId": { "label": "通知频道", "help": "接收审批与通知的 Slack 频道 ID（如 C0123456789）。" }
         }
       },
       "whatsapp": {
@@ -951,12 +965,14 @@
           "step4": { "title": "配置 Webhook（必需）", "desc": "WhatsApp 不支持轮询：把 Meta 的回调地址设为可公网访问的 HTTPS 端点、填写校验 Token 并订阅 messages 字段。要给真实用户发消息还需完成 Meta 商业验证。" }
         },
         "fields": {
-          "phoneNumberId": { "label": "Phone Number ID", "help": "用作发送方的 Meta Cloud API 手机号 ID。" },
+          "phoneNumberId": { "label": "Phone Number ID", "help": "用作发送方的 Meta Cloud API 手机号 ID。", "placeholder": "123456789012345" },
+          "notifyEnabled": { "label": "通知", "help": "把该机器人的审批与通知投递到下方配置的目的地。" },
+          "notifyWaId": { "label": "通知 WhatsApp ID", "help": "接收审批与通知的 wa_id（国际格式手机号）。" },
           "accessToken": { "label": "访问令牌", "help": "调用 Cloud API 的令牌。测试可用 API Setup 的临时令牌（约 24 小时过期）；正式使用请用永久系统用户令牌。" },
           "agentId": { "label": "绑定 Agent", "help": "应答入站消息的 Agent。留空则需按通道显式绑定。", "placeholder": "agt_…" },
           "businessAccountId": { "label": "Business Account ID" },
           "apiVersion": { "label": "API 版本", "help": "拼接在基础 URL 后的 Graph API 版本段。" },
-          "baseUrl": { "label": "基础 URL" },
+          "baseUrl": { "label": "基础 URL", "placeholder": "https://graph.facebook.com" },
           "webhookPort": { "label": "Webhook 端口", "help": "webhook 服务监听的本地端口。留空则不启用入站 webhook。" },
           "webhookPath": { "label": "Webhook 路径" },
           "webhookVerifyToken": { "label": "Webhook 校验 Token", "help": "Meta 的 GET webhook 校验握手时会回显该值。" },
@@ -977,7 +993,9 @@
           "botToken": { "label": "Bot Token", "help": "来自 Discord 开发者后台的机器人 Token。" },
           "agentId": { "label": "绑定 Agent", "help": "应答入站消息的 Agent。留空则需按通道显式绑定。", "placeholder": "agt_…" },
           "apiUrl": { "label": "API 地址", "placeholder": "https://discord.com/api/v10" },
-          "gatewayUrl": { "label": "Gateway 地址", "placeholder": "wss://gateway.discord.gg" }
+          "gatewayUrl": { "label": "Gateway 地址", "placeholder": "wss://gateway.discord.gg" },
+          "notifyEnabled": { "label": "通知", "help": "把该机器人的审批与通知投递到下方配置的目的地。" },
+          "notifyChannelId": { "label": "通知频道", "help": "接收审批与通知的 Discord 频道 ID。" }
         }
       }
     }
@@ -1013,14 +1031,17 @@
     "longConnectionNote": "长连接模式仅支持企业自建应用，不支持商店应用。使用长连接无需公网 IP 或域名。",
     "quickSetup": "快速设置",
     "oneClickTitle": "一键接入飞书",
-    "oneClickDesc": "使用飞书扫描二维码，自动创建并配置应用。无需手动设置。",
+    "oneClickDesc": "点击右侧「扫码创建应用」，用飞书扫一扫即可自动创建并配置应用，无需手动设置。",
     "scanToCreate": "扫码创建应用",
+    "bindAgent": "回答这个机器人的 Agent",
+    "bindAgentHint": "发给这个机器人的消息由该 Agent 应答。先在这里选好，机器人就不会被接到错的 Agent 上。",
+    "bindAgentLocked": "该 Agent 已写入二维码——取消扫码才能更改。",
     "oneClickPermissions": "应用将自动获取以下权限：机器人消息发送、消息接收、用户信息读取、群聊管理。",
     "generatingQR": "正在生成二维码...",
     "scanWithFeishu": "使用飞书扫一扫",
     "scanHint": "打开飞书手机客户端，扫描二维码完成授权。应用将创建在你的组织中。",
     "qrExpire": "二维码将在 {{minutes}} 分钟后过期",
-    "registerSuccess": "应用创建成功！集成已自动激活。",
+    "registerSuccess": "应用创建成功！机器人已就绪，接下来为它指定回答的 Agent。",
     "registerFailed": "注册失败",
     "manualConfig": "手动配置（高级）",
     "appInfo": "应用信息",
@@ -1119,6 +1140,12 @@
     "modelGuidanceCodex": "显示标准模型列表。可手动输入自定义模型名称。"
   },
   "instances": {
+    "setup": {
+      "title": "连接方式",
+      "configuredTitle": "机器人设置",
+      "guided": "扫码创建（推荐）",
+      "manual": "手动填写凭证"
+    },
     "subtitle": "每个机器人都是一个实例：独立的凭证、独立的 Agent、独立的会话。一个平台可以挂载多个机器人。",
     "botCount": "{{count}} 个机器人",
     "botCount_other": "{{count}} 个机器人",
@@ -1127,9 +1154,34 @@
     "newBot": "新机器人",
     "toggleLabel": "开启或关闭该机器人",
     "credentials": "凭证",
-    "moreSettings": "更多配置",
-    "moreSettingsHint": "路由、通知接收方与高级选项",
+    "credentialsSet": "凭证已配置",
+    "credentialsEdit": "修改",
+    "credentialsHide": "收起",
+    "moreSettings": "高级",
+    "moreSettingsHint": "会话路由与平台选项",
+    "advancedTitle": "平台选项",
     "advancedHint": "绝大多数情况下默认值就是对的——除非你确定需要，否则不用动。",
+    "notify": {
+      "title": "通知",
+      "masterLabel": "启用通知",
+      "destination": "消息去处",
+      "content": "发送内容",
+      "configured": "已配置目的地——审批与通知将投递到这里。",
+      "notConfigured": "尚未配置目的地——审批与通知无处可去，会被丢弃。",
+      "unsupported": "该平台未声明通知目的地。",
+      "reachConfigured": "已配置",
+      "reachNotConfigured": "未配置",
+      "reachUnsupported": "不支持",
+      "conversations": "会话",
+      "pickEmpty": "在 IM 里把机器人拉进群 → 点「加载群组」→ 从列表里选择。",
+      "manualInput": "手动输入 ID",
+      "currentDestination": "当前目的地",
+      "guidanceFallback": "该平台无法列出会话——请手动填写目的地 ID。"
+    },
+    "channels": {
+      "refresh": "刷新",
+      "refreshing": "刷新中…"
+    },
     "autosave": {
       "saving": "保存中…",
       "saved": "已保存"
@@ -1144,15 +1196,22 @@
     "routing": {
       "title": "路由",
       "hint": "为每个会话选择应答的 Agent，并指定该机器人的通知接收方。",
-      "notifyTarget": "通知接收方",
-      "notifyTargetHint": "有关该机器人的审批与通知都会发送到这里。留空则使用组织秘书。",
-      "chats": "会话绑定",
+      "notifyTarget": "通知目的地",
+      "notifyTargetHint": "在上方「通知」面板设置目的地——审批与通知将投递到那里。",
+      "notifyFallback": "兜底：通知此 Agent",
+      "notifyFallbackHint": "可选。通知会发到上方配置的目的地；只有在未配置时，才投递到该 Agent 的会话。",
+      "chats": "会话路由",
+      "chatsHint": "上方绑定的 Agent 默认应答所有会话。在这里把某个会话交给别的 Agent。",
       "unsupported": "该平台不支持枚举会话。",
       "chatAgent": "该会话的 Agent",
       "searchChats": "搜索会话…",
       "autoSaved": "修改会自动保存。",
       "save": "保存路由",
-      "agentRequired": "每个选中的会话都需要指定一个 Agent（还有 {{count}} 个未指定）。"
+      "agentRequired": "每个选中的会话都需要指定一个 Agent（还有 {{count}} 个未指定）。",
+      "guidance": {
+        "telegram": "Telegram 机器人无法列出会话——把机器人拉进群后，在此填入该群的 chat ID。",
+        "whatsapp": "WhatsApp 无法列出你的会话——在此填入目的地号码或群 ID。"
+      }
     }
   }
 }

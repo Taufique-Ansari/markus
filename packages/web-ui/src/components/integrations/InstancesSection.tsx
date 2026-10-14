@@ -31,6 +31,7 @@ import {
 import { type AgentOption } from './AgentSelect.tsx';
 import { InstanceCard, defaultInstanceClient, type InstanceClient } from './InstanceCard.tsx';
 import { PlatformIcon } from './PlatformIcon.tsx';
+import { PLATFORM_EXTRAS } from './platformExtras.tsx';
 
 export interface InstancesSectionProps {
   /** Platform catalog (drives the groups). Defaults to GET /settings/integrations. */
@@ -43,6 +44,15 @@ export interface InstancesSectionProps {
   extras?: Record<string, PlatformExtras>;
   /** Override the agent list for agent pickers. Defaults to the cached API. */
   loadAgents?: () => Promise<AgentOption[]>;
+  /**
+   * Development mode — decides whether `devOnly` platforms are offered.
+   *
+   * Defaults to the build's own signal (`import.meta.env.DEV`), which is the one
+   * source of truth in production. It is injectable purely so a test can render
+   * *both* builds and prove the section actually consumes the flag — a component
+   * that silently ignored it would otherwise pass every unit test.
+   */
+  devMode?: boolean;
   defaultExpanded?: boolean;
 }
 
@@ -60,8 +70,9 @@ export function InstancesSection({
   loadPlatforms = defaultLoadPlatforms,
   loadInstances = defaultLoadInstances,
   client = defaultInstanceClient,
-  extras,
+  extras = PLATFORM_EXTRAS,
   loadAgents,
+  devMode = import.meta.env.DEV,
   defaultExpanded = false,
 }: InstancesSectionProps) {
   const { t } = useTranslation(['settings', 'common']);
@@ -75,6 +86,10 @@ export function InstancesSection({
   // that happens nothing exists server-side, which is why an abandoned draft
   // costs nothing and leaves no half-configured bot behind.
   const [adding, setAdding] = useState<string | null>(null);
+  // The bot a panel just created server-side (the Feishu scan-to-create flow).
+  // Its card opens expanded so the user lands on the remaining step — which
+  // agent answers — instead of a collapsed row in a list they have to find.
+  const [freshlyCreated, setFreshlyCreated] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     const [nextInstances, nextPlatforms] = await Promise.all([loadInstances(), loadPlatforms()]);
@@ -114,8 +129,8 @@ export function InstancesSection({
     [platforms, t],
   );
   const platformIds = useMemo(
-    () => visiblePlatformIds(platforms, instances),
-    [platforms, instances],
+    () => visiblePlatformIds(platforms, instances, { devMode }),
+    [platforms, instances, devMode],
   );
 
   const startAdd = useCallback((platform: string) => {
@@ -194,7 +209,10 @@ export function InstancesSection({
                 extras={extras}
                 loadAgents={loadAgents}
                 onChanged={reload}
-                onCreated={() => setAdding(null)}
+                onCreated={(id) => {
+                  setAdding(null);
+                  setFreshlyCreated(id);
+                }}
                 defaultExpanded
               />
             )}
@@ -207,7 +225,7 @@ export function InstancesSection({
                 extras={extras}
                 loadAgents={loadAgents}
                 onChanged={reload}
-                defaultExpanded={defaultExpanded}
+                defaultExpanded={defaultExpanded || instance.id === freshlyCreated}
               />
             ))}
 

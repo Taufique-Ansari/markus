@@ -190,6 +190,62 @@ Every platform with `capabilities.inbound` includes the same `AGENT_BINDING_FIEL
 It is defined once in `registry.ts` so the binding capability has one shape; a
 per-platform binding key would be a second source of truth for the same fact.
 
+### Shared annotation: notification destinations (`notifyTarget`)
+
+A field may carry `notifyTarget: 'chat' | 'user'`. It declares that the field is a
+**notification destination** — where approvals and agent/task events are delivered
+— and its semantic kind (`chat` = a group/channel, `user` = a person). The outbound
+resolver scans a platform's annotated fields (in manifest order) and needs **no
+platform branch**, so a new platform becomes a notification target by declaring a
+field rather than adding an `if (platform === …)` (see
+`docs/architecture/notification-delivery.md`).
+
+| platform | destination field | kind |
+| --- | --- | --- |
+| `feishu` | `notifyChatId` | chat |
+| `telegram` | `notifyChatId` | chat |
+| `slack` | `notifyChannelId` | chat |
+| `discord` | `notifyChannelId` | chat |
+| `whatsapp` | `notifyWaId` | user |
+
+**A destination is a group, never a person.** Approvals and notifications are
+posted into a chat the bot has been added to; a bot that holds only a personal
+address is not a notification channel. Every platform with group semantics
+therefore declares exactly one `chat` destination, and a bot with no group is
+honestly **unconfigured** rather than silently counted as configured. The one
+exception is **WhatsApp**, whose Cloud API has no groups — its only addressable
+recipient is a `wa_id`, so it declares a `user` destination (see the note under
+`whatsapp`).
+
+The kind maps onto a wire receive-id type (`chat → chat_id`, `user → open_id`); an
+adapter whose token differs translates it at the edge. Destination fields are
+always **optional** — a required field would silently disable the platform (the
+`isManifestEnabled` rule). Feishu's key is the pre-existing `notifyChatId`, so a
+config written before the annotation existed keeps resolving.
+
+### Development-only platforms (`devOnly`)
+
+At manifest level a platform may carry `devOnly: true`. It means: the adapter
+exists and is unit-tested, but the integration has **not** been verified end to
+end against the live service (on a desktop install there is no public URL and no
+real credentials for it). A production build must not offer it.
+
+| platform | `devOnly` | why |
+| --- | --- | --- |
+| `feishu` | — | verified end to end (long connection) |
+| `telegram` | — | verified end to end (long polling) |
+| `slack` | ✅ | adapter + manifest only; no live verification |
+| `whatsapp` | ✅ | adapter + manifest only; no live verification |
+| `discord` | ✅ | adapter + manifest only; no live verification |
+
+It is a **presentation** gate, not a capability gate: the manifest, the adapter
+and the Settings API are all unchanged, so a build can be exercised in
+development and the flag flipped without touching anything else. The single
+reader is the Settings UI (`visiblePlatformIds`, driven by
+`import.meta.env.DEV`), which drops the platform — and any instance of it —
+outside a development build. The set of gated platforms is pinned by
+`packages/comms/test/platform-registry.test.ts`.
+
 ### `feishu`
 
 | key | type | required | secret | default |
@@ -202,7 +258,6 @@ per-platform binding key would be a second source of truth for the same fact.
 | `encryptKey` | password | no | ✅ | |
 | `verificationToken` | password | no | ✅ | |
 | `notifyChatId` | text | no | | |
-| `notifyOpenId` | text | no | | |
 | `notifyOnApproval` | boolean | no | | `true` |
 | `notifyOnNotification` | boolean | no | | `false` |
 | `notifyPriority` | select (multiple) | no | | `["high", "urgent"]` |
@@ -212,7 +267,7 @@ Every field above mirrors a value that already exists in code — either read
 directly by `FeishuAdapter` (`appId`, `appSecret`, `domain`, `wsMode`,
 `webhookPort`, `encryptKey`), declared in `FeishuAdapterConfig` /
 `FeishuConfigPayload` (`verificationToken`), stored under
-`MarkusConfig.integrations.feishu` (`notifyChatId`, `notifyOpenId`), or — for the
+`MarkusConfig.integrations.feishu` (`notifyChatId`), or — for the
 `notifyOn*` preferences — served before the manifest programme by the
 Feishu-specific `GET/PUT /api/settings/integrations/feishu/notifications`
 endpoint (recording them here is what lets the manifest-driven Settings form
@@ -225,6 +280,7 @@ surface; it records the surface that already exists in one place.
 | key | type | required | secret | default |
 | --- | --- | --- | --- | --- |
 | `botToken` | password | yes | ✅ | |
+| `notifyChatId` | text | no | | |
 | `agentId` | text | no | | |
 | `apiUrl` | text | no | | `https://api.telegram.org` |
 | `pollingEnabled` | boolean | no | | `false` |
@@ -236,9 +292,13 @@ Probe: `getMe` (the same call `TelegramAdapter.connect()` makes).
 
 ### `slack`
 
+> **Development-only** (`devOnly: true`): the adapter is unit-tested but has not
+> been verified end to end against Slack, so a production build does not offer it.
+
 | key | type | required | secret | default |
 | --- | --- | --- | --- | --- |
 | `botToken` | password | yes | ✅ | |
+| `notifyChannelId` | text | no | | |
 | `agentId` | text | no | | |
 | `signingSecret` | password | no | ✅ | |
 | `appToken` | password | no | ✅ | |
@@ -261,10 +321,15 @@ valid webhook-only configuration.
 
 ### `whatsapp`
 
+> **Development-only** (`devOnly: true`): the adapter is unit-tested but has not
+> been verified end to end against Meta's Cloud API, so a production build does
+> not offer it.
+
 | key | type | required | secret | default |
 | --- | --- | --- | --- | --- |
 | `phoneNumberId` | text | yes | | |
 | `accessToken` | password | yes | ✅ | |
+| `notifyWaId` | text | no | | |
 | `agentId` | text | no | | |
 | `businessAccountId` | text | no | | |
 | `apiVersion` | text | no | | `v18.0` |
@@ -279,11 +344,19 @@ Cloud API token, so `testConnection` is intentionally omitted and the Settings
 API returns `{ ok: false, error: 'test not supported' }` — honest, not a fake
 success.
 
+WhatsApp is the **only** platform whose notification destination is a person
+(`notifyWaId`, kind `user`): the Cloud API addresses one `wa_id` and has no group
+concept, so removing it would leave WhatsApp with no notification path at all.
+
 ### `discord`
+
+> **Development-only** (`devOnly: true`): the adapter is unit-tested but has not
+> been verified end to end against Discord, so a production build does not offer it.
 
 | key | type | required | secret | default |
 | --- | --- | --- | --- | --- |
 | `botToken` | password | yes | ✅ | |
+| `notifyChannelId` | text | no | | |
 | `agentId` | text | no | | |
 | `apiUrl` | text | no | | `https://discord.com/api/v10` |
 | `gatewayUrl` | text | no | | `wss://gateway.discord.gg` |

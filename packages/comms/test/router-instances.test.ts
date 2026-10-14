@@ -145,3 +145,73 @@ describe('MessageRouter — bot instances (G2)', () => {
     expect(sales.connectCalls).toHaveLength(0);
   });
 });
+
+/**
+ * Runtime (de)registration — the adapter set is *derived* state.
+ *
+ * Startup was the only writer of the adapter table: `registerAdapter` ran at boot
+ * and `reconnectPlatform` could only reach bots that were *already* registered.
+ * A bot created afterwards therefore had no adapter to connect and stayed dead
+ * until the process restarted. These pin the two primitives that close the gap.
+ */
+describe('MessageRouter — runtime instance registration', () => {
+  it('connects an instance registered after boot (the "no restart" path)', async () => {
+    const router = new MessageRouter();
+    const late = stubAdapter('telegram');
+    router.registerAdapter(late, 'bi_tg_late');
+    expect(router.hasInstance('bi_tg_late')).toBe(true);
+
+    const ok = await router.connectInstance('bi_tg_late', {
+      platform: 'telegram',
+      botToken: 'X',
+      instanceId: 'bi_tg_late',
+    });
+
+    expect(ok).toBe(true);
+    expect(late.connectCalls).toHaveLength(1);
+    expect(late.connectCalls[0]).toMatchObject({ botToken: 'X', instanceId: 'bi_tg_late' });
+  });
+
+  it('wires the message handler when connecting at runtime (no drift vs connectAll)', async () => {
+    const router = new MessageRouter();
+    const late = stubAdapter('telegram');
+    router.registerAdapter(late, 'bi_tg_late');
+
+    await router.connectInstance('bi_tg_late', { platform: 'telegram', instanceId: 'bi_tg_late' });
+
+    // The wiring lives in one place, so a runtime connect must attach it too —
+    // without this a late bot would connect but never receive anything.
+    expect(late.onMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('answers false (never throws) for an unknown instance', async () => {
+    const router = new MessageRouter();
+
+    await expect(router.connectInstance('nope', { platform: 'telegram' })).resolves.toBe(false);
+  });
+
+  it('unregister disconnects the bot and removes it from the instance list', async () => {
+    const router = new MessageRouter();
+    const bot = stubAdapter('telegram');
+    router.registerAdapter(bot, 'bi_tg_x');
+    await router.connectInstance('bi_tg_x', { platform: 'telegram', instanceId: 'bi_tg_x' });
+
+    await router.unregisterInstance('bi_tg_x');
+
+    expect(bot.disconnect).toHaveBeenCalled();
+    expect(router.hasInstance('bi_tg_x')).toBe(false);
+    expect(router.getInstances().some((b) => b.instanceId === 'bi_tg_x')).toBe(false);
+  });
+
+  it('unregister is idempotent — dropping an unknown bot is a quiet no-op', async () => {
+    const router = new MessageRouter();
+    const bot = stubAdapter('telegram');
+    router.registerAdapter(bot, 'bi_tg_x');
+
+    await router.unregisterInstance('bi_tg_x');
+    await expect(router.unregisterInstance('bi_tg_x')).resolves.toBeUndefined();
+
+    // Exactly one disconnect: the second drop must not re-touch a gone bot.
+    expect(bot.disconnect).toHaveBeenCalledTimes(1);
+  });
+});

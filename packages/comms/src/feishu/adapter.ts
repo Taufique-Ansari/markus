@@ -4,12 +4,14 @@ import { createLogger, msgId, type Message } from '@markus/shared';
 import type {
   CommAdapter,
   CommAdapterConfig,
+  CardResolution,
   InboundAction,
   InboundActionHandler,
   IncomingMessageHandler,
   SendOptions,
 } from '../adapter.js';
 import { FeishuClient, type ReceiveIdType } from './client.js';
+import { buildNotificationCard, buildResolvedApprovalCard } from './cards.js';
 import { activeInboundMode, getManifest } from '../platforms/registry.js';
 import { createHmac, randomBytes, createCipheriv, createDecipheriv, scrypt } from 'node:crypto';
 import { promisify } from 'node:util';
@@ -83,6 +85,13 @@ export class FeishuAdapter implements CommAdapter {
   readonly platform = 'feishu';
   private client?: FeishuClient;
   private config?: FeishuAdapterConfig;
+  /**
+   * open_id → display name cache. Names are stable and a card rewrite is a
+   * cosmetic path, so one lookup per actor for the process lifetime is plenty;
+   * a miss is cached as `null` so a user outside the contact range is not
+   * re-queried on every tap.
+   */
+  private actorNameCache = new Map<string, string | null>();
   private handlers: IncomingMessageHandler[] = [];
   private server?: ReturnType<typeof createServer>;
   /**
@@ -147,6 +156,24 @@ export class FeishuAdapter implements CommAdapter {
     if (!this.client) throw new Error('Feishu adapter not connected');
     const feishuOpts = options as FeishuSendOptions | undefined;
     const idType = feishuOpts?.receiveIdType ?? 'chat_id';
+
+    // Slice T2 — the renderer chose a card and handed us platform-neutral content,
+    // so build Feishu's own interactive card (header + body + a row of buttons),
+    // each button carrying its signed action ref. Without this the format decision
+    // was discarded and an approval degraded to literal `[label] ref` text (R3).
+    if (options?.format === 'card' && options.card) {
+      try {
+        return await this.client.sendInteractiveMessage(
+          channelId,
+          buildNotificationCard(options.card),
+          idType,
+        );
+      } catch (error) {
+        // Never lose a message over formatting: fall through to the markdown /
+        // text paths below (options.markdown is set for any non-text format).
+        log.warn('Feishu rejected the notification card; falling back to text', { error: String(error) });
+      }
+    }
 
     if (feishuOpts?.asCard) {
       return this.client.sendInteractiveMessage(channelId, JSON.parse(content), idType);
@@ -236,6 +263,47 @@ export class FeishuAdapter implements CommAdapter {
    */
   onAction(handler: InboundActionHandler): void {
     this.actionHandlers.push(handler);
+  }
+
+  /**
+   * Rewrite a sent card into its decided form (buttons gone, status shown). A
+   * Feishu interactive card is a one-shot message: it never changes on its own, so
+   * without this the tapper gets no feedback at all. Best-effort by contract — a
+   * failure here must never roll back the decision that was already recorded.
+   */
+  async updateResolvedCard(messageId: string, resolution: CardResolution): Promise<void> {
+    if (!this.client) throw new Error('Feishu adapter not connected');
+    const card = buildResolvedApprovalCard({
+      title: resolution.title,
+      body: resolution.body,
+      status: resolution.status,
+      actorId: resolution.actorId,
+      actorName: resolution.actorName,
+      selectedOption: resolution.selectedOption,
+      at: resolution.at,
+    });
+    await this.client.updateInteractiveMessage(messageId, card);
+  }
+
+  /**
+   * Resolve an operator `open_id` to a display name, best-effort. Never throws:
+   * a lookup failure or missing scope degrades to `null` (the caller keeps the
+   * raw id). Cached, including negative results.
+   */
+  async resolveActorName(actorId: string): Promise<string | null> {
+    if (!actorId) return null;
+    if (this.actorNameCache.has(actorId)) return this.actorNameCache.get(actorId) ?? null;
+    if (!this.client) return null;
+    try {
+      const names = await this.client.getUserNames([actorId]);
+      const name = names.get(actorId) ?? null;
+      this.actorNameCache.set(actorId, name);
+      return name;
+    } catch (err) {
+      log.warn('Failed to resolve actor name', { actorId, error: String(err) });
+      // Do not cache transient failures — the next tap may succeed.
+      return null;
+    }
   }
 
   isConnected(): boolean {
@@ -460,11 +528,20 @@ export class FeishuAdapter implements CommAdapter {
       (event['open_id'] as string | undefined) ??
       'unknown';
 
+    // Feishu puts the originating message id in `context.open_message_id` (card
+    // action v2); older card callbacks carry it at the top level. Either way it
+    // is what the reply/update APIs need to edit *this* card.
+    const ctx = event['context'] as Record<string, unknown> | undefined;
+    const messageId =
+      (ctx?.['open_message_id'] as string | undefined) ??
+      (event['open_message_id'] as string | undefined);
+
     const inbound: InboundAction = {
       platform: this.platform,
       instanceId: this.config?.instanceId ?? this.platform,
       payload: event,
       actorId: operatorId,
+      messageId,
       timestamp: new Date().toISOString(),
     };
 

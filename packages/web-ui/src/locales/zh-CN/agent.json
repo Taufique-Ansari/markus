@@ -274,8 +274,7 @@
     "filesTab": {
       "loading": "正在加载文件…",
       "templateUpdateAvailable": "模板有更新",
-      "filesDiffer": "有 {{count}} 个文件与模板 {{templateId}} 不一致：",
-      "filesDiffer_plural": "有 {{count}} 个文件与模板 {{templateId}} 不一致：",
+      "filesDiffer_other": "有 {{count}} 个文件与模板 {{templateId}} 不一致：",
       "syncing": "同步中…",
       "syncAll": "全部同步",
       "sendToAgent": "发送给智能体",

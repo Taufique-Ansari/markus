@@ -2,6 +2,7 @@ import { createLogger, type Message } from '@markus/shared';
 import type {
   CommAdapter,
   CommAdapterConfig,
+  CardResolution,
   InboundAction,
   InboundActionHandler,
   SendOptions,
@@ -98,6 +99,14 @@ export class MessageRouter {
    * own slot (docs/architecture/messaging-gateway.md §4.2).
    */
   private bots = new Map<string, RegisteredBot>();
+  /**
+   * Adapters that already carry this router's message/action handlers.
+   *
+   * Keyed by adapter identity, not by instance: registering the same adapter
+   * object twice must not wire it twice, or the append-semantics of
+   * `onMessage` bring the duplicate delivery straight back.
+   */
+  private wiredAdapters = new WeakSet<CommAdapter>();
   /** Explicit per-channel bindings: `${platform}:${channelId}` → agentId. */
   private agentChannelMap = new Map<string, string>();
   /** Platform-level default binding: platform → agentId. */
@@ -130,12 +139,52 @@ export class MessageRouter {
    * bots of the same platform side by side.
    */
   registerAdapter(adapter: CommAdapter, instanceId: string = adapter.platform): void {
-    this.bots.set(instanceId, { instanceId, platform: adapter.platform, adapter });
+    const bot: RegisteredBot = { instanceId, platform: adapter.platform, adapter };
+    this.bots.set(instanceId, bot);
+    // Wiring belongs to *registration*, not to connecting. An adapter's
+    // `onMessage`/`onAction` **append** (a platform may fan out to several
+    // consumers), so wiring on every (re)connect accumulated one extra copy of
+    // the router's handler per reconnect — and `processMessageEvent` iterates
+    // all of them, so one inbound message was delivered once per reconnect:
+    // the "one message, two replies" defect. Register exactly once here; a
+    // reconnect then only re-establishes the transport.
+    this.wireAdapter(bot);
     log.info(
       instanceId === adapter.platform
         ? `Registered comm adapter: ${adapter.platform}`
         : `Registered comm adapter: ${adapter.platform} (instance ${instanceId})`,
     );
+  }
+
+  /** Whether an instance currently holds a registered adapter. */
+  hasInstance(instanceId: string): boolean {
+    return this.bots.has(instanceId);
+  }
+
+  /**
+   * Drop one bot: disconnect it and forget it. The mirror of
+   * {@link registerAdapter}.
+   *
+   * Without this the adapter set could only ever grow, so a deleted or disabled
+   * bot kept a live connection *and* a stale slot in {@link getInstances} — the
+   * same "persisted ≠ live" gap as a bot that never connects, seen from the
+   * other side. Idempotent: an unknown instance is a no-op, because "already
+   * gone" is the desired end state.
+   */
+  async unregisterInstance(instanceId: string): Promise<void> {
+    const bot = this.bots.get(instanceId);
+    if (!bot) return;
+    this.bots.delete(instanceId);
+    try {
+      if (bot.adapter.isConnected()) await bot.adapter.disconnect();
+    } catch (error) {
+      // The slot is already dropped; a failing disconnect must not resurrect it.
+      log.warn(`Failed to disconnect ${bot.platform} adapter while unregistering`, {
+        instanceId,
+        error: String(error),
+      });
+    }
+    log.info(`Unregistered comm adapter: ${bot.platform} (instance ${instanceId})`);
   }
 
   /** Every live bot with its platform and connection state — observability. */
@@ -258,6 +307,43 @@ export class MessageRouter {
     await this.actionHandler(action);
   }
 
+  /**
+   * Rewrite an already-sent interactive card to show the outcome of a tap.
+   *
+   * Returns `false` when the platform/instance is unknown **or** its adapter
+   * cannot edit messages — "no feedback possible" is a normal answer here, never
+   * an error, because the decision itself was already recorded elsewhere.
+   */
+  async updateResolvedCard(
+    platform: string,
+    instanceId: string | undefined,
+    messageId: string,
+    resolution: CardResolution,
+  ): Promise<boolean> {
+    const bot = instanceId ? this.bots.get(instanceId) : this.botForPlatform(platform);
+    const update = bot?.adapter.updateResolvedCard;
+    if (!bot || !update) return false;
+    await update.call(bot.adapter, messageId, resolution);
+    return true;
+  }
+
+  /**
+   * Resolve a platform actor id to a display name, best-effort. Returns `null`
+   * when the platform/instance is unknown or its adapter cannot look names up —
+   * the caller keeps the raw id, which is always correct (just less friendly).
+   */
+  async resolveActorName(
+    platform: string,
+    instanceId: string | undefined,
+    actorId: string,
+  ): Promise<string | null> {
+    if (!actorId) return null;
+    const bot = instanceId ? this.bots.get(instanceId) : this.botForPlatform(platform);
+    const resolve = bot?.adapter.resolveActorName;
+    if (!bot || !resolve) return null;
+    return resolve.call(bot.adapter, actorId);
+  }
+
   async connectAll(configs: CommAdapterConfig[]): Promise<void> {
     for (const config of configs) {
       const bot = this.botFor(config);
@@ -269,14 +355,7 @@ export class MessageRouter {
       }
 
       try {
-        await bot.adapter.connect(config);
-        bot.lastConfig = config;
-        bot.adapter.onMessage(async (message: Message) => {
-          await this.routeIncomingMessage(message, bot);
-        });
-        // Action port (design §6.5): card taps go to the action handler, never
-        // through the conversation path.
-        bot.adapter.onAction?.((action: InboundAction) => this.dispatchAction(action));
+        await this.wireAndConnect(bot, config);
       } catch (error) {
         log.error(`Failed to connect ${config.platform} adapter, skipping`, { error: String(error) });
       }
@@ -305,11 +384,43 @@ export class MessageRouter {
   }
 
   /**
+   * Connect (or reconnect) **one already-registered** bot with `config`.
+   *
+   * The runtime counterpart of the startup connect. {@link reconnectPlatform}
+   * can only reach bots that were registered at boot, so it can never bring up a
+   * bot created later — which is why a newly saved instance used to stay dead
+   * until the process restarted. This is what the settings API calls after an
+   * instance is created or saved.
+   *
+   * Returns `false` (never throws) when the instance is unknown or the connect
+   * fails; the caller logs and every other bot is unaffected.
+   */
+  async connectInstance(instanceId: string, config: CommAdapterConfig): Promise<boolean> {
+    const bot = this.bots.get(instanceId);
+    if (!bot) {
+      log.warn(`Cannot connect unknown instance: ${instanceId}`);
+      return false;
+    }
+    try {
+      if (bot.adapter.isConnected()) await bot.adapter.disconnect();
+      await this.wireAndConnect(bot, config);
+      return true;
+    } catch (error) {
+      log.error(`Failed to connect instance ${instanceId}`, { error: String(error) });
+      return false;
+    }
+  }
+
+  /**
    * Reconnect every bot of a platform, merging `configOverrides` over each bot's
    * last-used config, so a saved Settings change takes effect without a restart
    * (slice G6 — replaces the retired notifier's runtime `updateConfig`). The same
    * message/action wiring is re-applied; a failure is logged and never affects
    * other platforms.
+   *
+   * Scope is deliberately *registered* bots only: it re-applies a changed
+   * platform-level config to bots that already exist. Bringing up a bot that was
+   * never registered is {@link connectInstance}'s job.
    */
   async reconnectPlatform(
     platform: string,
@@ -325,16 +436,43 @@ export class MessageRouter {
       } as CommAdapterConfig;
       try {
         if (bot.adapter.isConnected()) await bot.adapter.disconnect();
-        await bot.adapter.connect(config);
-        bot.lastConfig = config;
-        bot.adapter.onMessage(async (message: Message) => {
-          await this.routeIncomingMessage(message, bot);
-        });
-        bot.adapter.onAction?.((action: InboundAction) => this.dispatchAction(action));
+        await this.wireAndConnect(bot, config);
       } catch (error) {
         log.error(`Failed to reconnect ${platform} adapter`, { error: String(error) });
       }
     }
+  }
+
+  /**
+   * Install the router's message/action ports on an adapter — **once**.
+   *
+   * Registration is the only caller. Keep it idempotent: adapters implement
+   * `onMessage`/`onAction` as an append (several consumers may listen), so a
+   * second call would silently double every inbound delivery (design §6.3).
+   */
+  private wireAdapter(bot: RegisteredBot): void {
+    if (this.wiredAdapters.has(bot.adapter)) return;
+    this.wiredAdapters.add(bot.adapter);
+    bot.adapter.onMessage(async (message: Message) => {
+      await this.routeIncomingMessage(message, bot);
+    });
+    // Action port (design §6.5): card taps go to the action handler, never
+    // through the conversation path.
+    bot.adapter.onAction?.((action: InboundAction) => this.dispatchAction(action));
+  }
+
+  /**
+   * Bring one registered bot's transport up (or back up) with `config`.
+   *
+   * Shared by {@link connectAll}, {@link reconnectPlatform} and
+   * {@link connectInstance} so the connect sequence cannot drift between the
+   * three entry points. It deliberately does **not** wire handlers: those belong
+   * to registration (see {@link wireAdapter}), and re-wiring on every connect is
+   * what used to duplicate every inbound message.
+   */
+  private async wireAndConnect(bot: RegisteredBot, config: CommAdapterConfig): Promise<void> {
+    await bot.adapter.connect(config);
+    bot.lastConfig = config;
   }
 
   /**

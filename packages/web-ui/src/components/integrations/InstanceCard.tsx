@@ -62,13 +62,21 @@ import {
   type TestConnectionResponse,
 } from '../../lib/platformIntegrations.ts';
 import { fieldText } from '../../lib/platformI18n.ts';
+import { useChannelList } from '../../hooks/useChannelList.ts';
+import {
+  notificationDestinationFields,
+  notificationFields,
+} from '../../lib/platformNotifications.ts';
 import { AgentSelect, loadAgentOptions, useAgentOptions, type AgentOption } from './AgentSelect.tsx';
+import { ChannelsRefresh } from './ChannelsRefresh.tsx';
 import { ConnectionTestPanel } from './ConnectionTestPanel.tsx';
+import { NotificationPanel } from './NotificationPanel.tsx';
 import { Msg, PlatformFields, StatusBadge } from './PlatformCard.tsx';
 import { PlatformIcon } from './PlatformIcon.tsx';
 import { SetupGuide } from './SetupGuide.tsx';
 import { ConfirmModal } from '../ConfirmModal.tsx';
 import { Switch } from '../Switch.tsx';
+import { CARD, CARD_TITLE, HINT, INPUT, ROW, ROW_CONTROL, ROW_LABEL } from './ui.ts';
 
 /** The instance operations the UI needs; injectable for tests. */
 export interface InstanceClient {
@@ -152,9 +160,30 @@ export function InstanceCard({
   );
   const [saveState, setSaveState] = useState<SaveState>({ kind: 'idle' });
 
-  // ── Routing (inside "More settings") ──────────────────────────────────────
-  const [known, setKnown] = useState<PlatformChannel[]>([]);
-  const [channelsError, setChannelsError] = useState<string | null>(null);
+  // ── Setup method — the guided scan and the manual credential inputs are
+  // alternatives, never shown together ───────────────────────────────────────
+  // A platform that declares `guidedSetup` (Feishu) offers a guided way to
+  // establish its own credentials. A bot that already has credentials, or a
+  // platform with no guided method, sits on the manual path.
+  const offersGuided = !!extras[instance.platform]?.guidedSetup;
+  const [setupMethod, setSetupMethod] = useState<'guided' | 'manual'>(
+    offersGuided && !instance.hasConfig ? 'guided' : 'manual',
+  );
+  // True while the guided method is the one on screen. The guided panel and the
+  // manual credential inputs are rendered in place of each other — see the
+  // connection section below.
+  const guidedActive = offersGuided && setupMethod === 'guided';
+
+  // ── Conversations (one shared action; see `useChannelList`) ───────────────
+  // The notification picker and the chat-bindings fold are two views of the
+  // SAME list, so they share one fetch, one loading flag and one error — the
+  // card can only ever be looking at one version of "who can this bot reach".
+  const {
+    channels: known,
+    error: channelsError,
+    loading: channelsLoading,
+    reloadChannels,
+  } = useChannelList(client.listChannels, instance.id, expanded && instance.canListChannels);
   const [search, setSearch] = useState('');
 
   // ── Verification ──────────────────────────────────────────────────────────
@@ -202,7 +231,16 @@ export function InstanceCard({
     setSaveState({ kind: 'idle' });
     setTest(null);
     setTestError(null);
+    setShowCredentials(false);
   }, [instance.id]);
+
+  // The guided method only makes sense while the bot has no credentials of its
+  // own; once they exist — or for a platform with no guided method — the card
+  // falls back to the manual path. (Re-keyed on `hasConfig` so a bot created by
+  // the scan opens, on the next read, on the manual path with its credentials.)
+  useEffect(() => {
+    setSetupMethod(offersGuided && !instance.hasConfig ? 'guided' : 'manual');
+  }, [instance.id, instance.hasConfig, offersGuided]);
 
   const markDirty = useCallback(() => {
     dirtyRef.current = true;
@@ -281,7 +319,9 @@ export function InstanceCard({
   // automatic now, so "blocked" has to mean "does not fire", not "button is
   // disabled" — otherwise the warning would be the only signal.
   const routesComplete = bindings.every((binding) => binding.agentId);
-  const readyToSave = !nameMissing && missing.length === 0 && routesComplete;
+  // The guided path (scan) creates the bot server-side, so the card must NOT
+  // also auto-create it from a half-filled draft — autosave is off while guided.
+  const readyToSave = !guidedActive && !nameMissing && missing.length === 0 && routesComplete;
 
   // A stable content key for everything the save writes.
   const editKey = useMemo(
@@ -340,43 +380,68 @@ export function InstanceCard({
     }
   }, [client, instance.id]);
 
-  // ── Conversations (only when the platform can enumerate them) ─────────────
-  useEffect(() => {
-    if (!expanded || !instance.canListChannels || !instance.id) return;
-    let alive = true;
-    client.listChannels(instance.id)
-      .then((res) => {
-        if (!alive) return;
-        setKnown(res.channels ?? []);
-        setChannelsError(res.error ?? null);
-      })
-      .catch((err) => {
-        if (!alive) return;
-        setKnown([]);
-        setChannelsError(err instanceof Error ? err.message : String(err));
-      });
-    return () => { alive = false; };
-  }, [expanded, instance.canListChannels, instance.id, client]);
-
   // ── Extras (a platform's own richer panel) ────────────────────────────────
   const extrasEntry = extras[instance.platform];
   const extrasCtx: PlatformExtrasContext = useMemo(
     () => ({
       platformId: instance.platform,
+      instanceId: instance.id || undefined,
       status,
       values,
       setValue: setField,
       reload: () => { void onChanged?.(); },
+      agents,
+      onCreated,
+      // Present only for a platform that offers the guided method — the card owns
+      // the choice so it can hide + stop requiring the fields the guided path
+      // supplies; the panel renders the guided UI when `guided`.
+      setupMethod: offersGuided ? setupMethod : undefined,
+      setSetupMethod: offersGuided ? setSetupMethod : undefined,
     }),
-    [instance.platform, status, values, setField, onChanged],
+    [instance.platform, instance.id, status, values, setField, onChanged, agents, onCreated, offersGuided, setupMethod],
   );
   const ownedKeys = useMemo(() => new Set(extrasEntry?.ownedFields ?? []), [extrasEntry]);
+
+  // ── Notification destinations (generic, manifest-driven) ──────────────────
+  // A platform whose manifest declares a destination gets the *same* panel as
+  // every other one — there is deliberately no per-platform code path here, so
+  // a platform added later is covered the day it annotates a destination. The
+  // panel then owns those fields (and the preference knobs next to them), so
+  // the generic form must not render them a second time. A platform that
+  // declares no destination keeps today's behaviour exactly.
+  const hasNotificationPanel = notificationDestinationFields(status.fields).length > 0;
+  const notificationOwned = useMemo(
+    () => new Set(hasNotificationPanel ? notificationFields(status.fields).map((f) => f.key) : []),
+    [status.fields, hasNotificationPanel],
+  );
+
   const genericFields = useMemo(
-    () => status.fields.filter((f) => !ownedKeys.has(f.key)),
-    [status.fields, ownedKeys],
+    () => status.fields.filter((f) => !ownedKeys.has(f.key) && !notificationOwned.has(f.key)),
+    [status.fields, ownedKeys, notificationOwned],
   );
   const primary = useMemo(() => primaryFields(genericFields), [genericFields]);
   const secondary = useMemo(() => secondaryFields(genericFields), [genericFields]);
+
+  // The primary fields are two different things wearing one label: the *agent*
+  // that answers (the step that actually remains after a bot is connected) and
+  // the *credentials* (already filled in by a scan or an earlier save). They are
+  // split so the agent is always visible and the credentials can fold away once
+  // they resolve — a user who just scanned a QR did not come here to retype the
+  // app secret.
+  const agentFields = useMemo(() => primary.filter((f) => f.type === 'agent'), [primary]);
+  const credentialFields = useMemo(() => primary.filter((f) => f.type !== 'agent'), [primary]);
+  const [showCredentials, setShowCredentials] = useState(false);
+  // "Credentials are in place" is a fact about the **stored** row, never about
+  // the live draft. Deriving it from `values` made the fold flip the instant the
+  // user cleared a field — which re-mounted the very input being edited and
+  // dropped the keystrokes. Reading it from `instance` means it can only change
+  // when the server says so.
+  const storedMissing = useMemo(
+    () => missingRequired(instance.fields, instance.values, instance.secrets),
+    [instance.fields, instance.values, instance.secrets],
+  );
+  const credentialsConfigured =
+    instance.hasConfig && !storedMissing.some((key) => credentialFields.some((f) => f.key === key));
 
   const visibleKnown = useMemo(() => filterChannels(known, search), [known, search]);
   const orphans = useMemo(() => orphanBindings(bindings, known), [bindings, known]);
@@ -510,45 +575,149 @@ export function InstanceCard({
 
       {expanded && (
         <div className="px-6 pb-6 pt-5 border-t border-border-default space-y-6">
-          {/* 1 — How to get the credentials. Always first: for a new bot it is
-                 the whole point, and for a configured one it collapses. */}
-          <SetupGuide status={status} configured={instance.hasConfig} />
+          {/* 1 — How to get the credentials — the *manual* path's instructions.
+                 Shown only while they still apply: a bot that already has
+                 credentials is past them, and the scan path needs none of them
+                 (the app is created and configured for you). */}
+          {!instance.hasConfig && !guidedActive && (
+            <SetupGuide
+              status={status}
+              configured={instance.hasConfig}
+              canListChannels={instance.canListChannels}
+              channelsGuidance={instance.channelsGuidance ?? null}
+            />
+          )}
 
-          {/* 2 — The platform's own richer panel, when it asks to be seen first
-                 (Feishu's scan-to-create is the recommended path). */}
-          {extrasEntry?.placement === 'before' && extrasEntry.render(extrasCtx)}
+          {/* 2 — A platform panel that asked to be seen first *and* declares no
+                 guided method. A platform WITH a guided method (Feishu) is
+                 rendered inside the connection section below instead, so the
+                 guided path and the manual inputs can replace each other. */}
+          {!offersGuided && extrasEntry?.placement === 'before' && extrasEntry.render(extrasCtx)}
 
-          {/* 3 — Credentials. Only what the platform cannot work without, plus
-                 the agent that answers; everything else moved to "More". */}
-          <section data-testid={`instance-credentials-${uid}`}>
-            <h3 className="text-xs font-semibold text-fg-tertiary uppercase tracking-wider mb-3">
-              {t('settings:instances.credentials', { defaultValue: 'Credentials' })}
+          {/* 3 — How this bot connects. A platform that offers a guided method
+                 (scan-to-create) shows a chooser between it and the manual
+                 inputs — never both at once. Everything else is manual only.
+                 Only what the platform cannot work without, plus the agent that
+                 answers; the rest moved to "More". */}
+          <section data-testid={`instance-credentials-${uid}`} className={CARD}>
+            <h3 className={`${CARD_TITLE} mb-3`}>
+              {instance.hasConfig
+                ? t('settings:instances.setup.configuredTitle', { defaultValue: 'Bot setup' })
+                : offersGuided
+                  ? t('settings:instances.setup.title', { defaultValue: 'Connection' })
+                  : t('settings:instances.credentials', { defaultValue: 'Credentials' })}
             </h3>
+
+            {/* The scan/manual choice is a *creation* decision: a bot that
+                already has credentials cannot be scan-created, so the chooser is
+                shown only while the bot is still unconfigured. */}
+            {offersGuided && !instance.hasConfig && (
+              <div
+                role="tablist"
+                className="inline-flex rounded-lg border border-border-default bg-surface-secondary p-0.5 mb-4"
+              >
+                {(['guided', 'manual'] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    role="tab"
+                    aria-selected={setupMethod === m}
+                    onClick={() => setSetupMethod(m)}
+                    data-testid={`setup-method-${m}-${uid}`}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                      setupMethod === m
+                        ? 'bg-surface-elevated text-fg-primary shadow-sm'
+                        : 'text-fg-tertiary hover:text-fg-secondary'
+                    }`}
+                  >
+                    {m === 'guided'
+                      ? t('settings:instances.setup.guided', { defaultValue: 'Scan to create (recommended)' })
+                      : t('settings:instances.setup.manual', { defaultValue: 'Enter credentials manually' })}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {guidedActive ? (
+              <div className="space-y-4">{extrasEntry!.render(extrasCtx)}</div>
+            ) : (
             <div className="space-y-4">
-              <div>
-                <label htmlFor={nameId} className="block text-xs font-medium text-fg-secondary mb-1.5">
+              <div className={ROW}>
+                <label htmlFor={nameId} className={ROW_LABEL}>
                   {t('settings:instances.addBot.name', { defaultValue: 'Bot name' })}
                   <span className="text-red-500 ml-0.5">*</span>
                 </label>
-                <input
-                  id={nameId}
-                  data-testid={`new-bot-name-${instance.platform}`}
-                  value={label}
-                  onChange={(e) => changeLabel(e.target.value)}
-                  placeholder={t('settings:instances.addBot.namePlaceholder', { defaultValue: 'e.g. Sales' })}
-                  className="w-full px-3 py-2 text-sm bg-surface-primary border border-border-default rounded-lg text-fg-primary placeholder-fg-tertiary focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-500 transition-colors"
-                />
+                <div className={ROW_CONTROL}>
+                  <input
+                    id={nameId}
+                    data-testid={`new-bot-name-${instance.platform}`}
+                    value={label}
+                    onChange={(e) => changeLabel(e.target.value)}
+                    placeholder={t('settings:instances.addBot.namePlaceholder', { defaultValue: 'e.g. Sales' })}
+                    className={INPUT}
+                  />
+                </div>
               </div>
-              <PlatformFields
-                status={status}
-                draft={values}
-                fields={primary}
-                onChange={setField}
-                agentOptions={agents}
-              />
+              {agentFields.length > 0 && (
+                <PlatformFields
+                  status={status}
+                  draft={values}
+                  fields={agentFields}
+                  onChange={setField}
+                  agentOptions={agents}
+                />
+              )}
+              {credentialFields.length > 0 &&
+                (credentialsConfigured && !showCredentials ? (
+                  <div data-testid={`instance-credentials-configured-${uid}`} className="space-y-3">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex items-center gap-1.5 text-xs text-green-600">
+                        <span aria-hidden="true">✓</span>
+                        {t('settings:instances.credentialsSet', { defaultValue: 'Credentials set' })}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setShowCredentials(true)}
+                        data-testid={`instance-credentials-edit-${uid}`}
+                        className="text-xs text-brand-600 hover:text-brand-700"
+                      >
+                        {t('settings:instances.credentialsEdit', { defaultValue: 'Change' })}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {credentialsConfigured && (
+                      <div className="flex items-center gap-2">
+                        <span className="inline-flex items-center gap-1.5 text-xs text-green-600">
+                          <span aria-hidden="true">✓</span>
+                          {t('settings:instances.credentialsSet', { defaultValue: 'Credentials set' })}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setShowCredentials(false)}
+                          data-testid={`instance-credentials-hide-${uid}`}
+                          className="text-xs text-brand-600 hover:text-brand-700"
+                        >
+                          {t('settings:instances.credentialsHide', { defaultValue: 'Hide' })}
+                        </button>
+                      </div>
+                    )}
+                    <PlatformFields
+                      status={status}
+                      draft={values}
+                      fields={credentialFields}
+                      onChange={setField}
+                      agentOptions={agents}
+                    />
+                  </div>
+                ))}
             </div>
+            )}
 
-            {/* Auto-save outcome, right where the edits happen. */}
+            {/* Auto-save outcome, right where the edits happen. Hidden while the
+                guided method is showing — the scan (not autosave) creates the
+                bot, so there is nothing to save and no gap to name. */}
             <div className="mt-3 min-h-[1.25rem]" data-testid={`instance-save-state-${uid}`}>
               <span
                 data-state={saveState.kind}
@@ -565,7 +734,7 @@ export function InstanceCard({
                     ✓ {t('settings:instances.autosave.saved', { defaultValue: 'Saved' })}
                   </span>
                 )}
-                {!readyToSave && (
+                {!readyToSave && !guidedActive && (
                   <span data-testid={`instance-missing-${uid}`}>
                     {missing.length > 0
                       ? t('settings:integrations.missingRequired', {
@@ -584,8 +753,8 @@ export function InstanceCard({
             )}
           </section>
 
-          {/* 4 — The two-way handshake. A run, not a setting, so it sits above
-                 the settings fold. */}
+          {/* 4 — The two-way handshake, directly under the credentials it proves:
+                 a run, not a setting, so it never hides in the settings fold. */}
           {!draft && (
             <section>
               <ConnectionTestPanel
@@ -602,21 +771,39 @@ export function InstanceCard({
             </section>
           )}
 
-          {/* 5 — Everything else, folded away. */}
-          <section>
+          {/* 5 — Where this bot delivers. Rendered for any platform whose
+                 manifest declares a destination — never a Feishu-only branch. */}
+          {!draft && hasNotificationPanel && (
+            <NotificationPanel
+              status={status}
+              values={values}
+              setValue={setField}
+              channels={known}
+              canListChannels={instance.canListChannels}
+              channelsLoading={channelsLoading}
+              channelsError={channelsError}
+              onReloadChannels={reloadChannels}
+              channelsGuidance={instance.channelsGuidance ?? null}
+              testSlot={extrasEntry?.sendTest?.(extrasCtx)}
+            />
+          )}
+
+          {/* 6 — Advanced, folded away. Each subsection is its own card, so the
+                 fold never becomes a wall of unrelated controls. */}
+          <section data-testid={`instance-more-${uid}`}>
             <button
               type="button"
               onClick={() => setMoreOpen((v) => !v)}
               aria-expanded={moreOpen}
               data-testid={`instance-more-toggle-${uid}`}
-              className="w-full flex items-center gap-2 text-left group"
+              className="w-full flex items-center gap-2 text-left group px-1"
             >
-              <span className="text-xs font-semibold text-fg-tertiary uppercase tracking-wider">
-                {t('settings:instances.moreSettings', { defaultValue: 'More settings' })}
+              <span className={CARD_TITLE}>
+                {t('settings:instances.moreSettings', { defaultValue: 'Advanced' })}
               </span>
-              <span className="text-[11px] text-fg-quaternary truncate hidden sm:inline">
+              <span className={`${HINT} truncate hidden sm:inline`}>
                 {t('settings:instances.moreSettingsHint', {
-                  defaultValue: 'Routing, notification target and advanced options',
+                  defaultValue: 'Chat routing and platform options',
                 })}
               </span>
               <svg
@@ -633,14 +820,14 @@ export function InstanceCard({
             </button>
 
             {moreOpen && (
-              <div
-                className="mt-3 space-y-5 bg-surface-secondary border border-border-default rounded-xl p-5"
-                data-testid={`instance-more-${uid}`}
-              >
+              <div className="mt-3 space-y-4">
                 {secondary.length > 0 && (
-                  <div className="space-y-4">
+                  <div className={CARD}>
+                    <h4 className={`${CARD_TITLE} mb-1`}>
+                      {t('settings:instances.advancedTitle', { defaultValue: 'Platform options' })}
+                    </h4>
                     {!draft && (
-                      <p className="text-[11px] text-fg-tertiary">
+                      <p className={`${HINT} mb-3`}>
                         {t('settings:instances.advancedHint', {
                           defaultValue:
                             'These default to the right value for almost every setup — leave them alone unless you know you need them.',
@@ -657,58 +844,56 @@ export function InstanceCard({
                   </div>
                 )}
 
-                {!draft && (
-                  <div>
-                    <div className="text-xs font-medium text-fg-secondary mb-1.5">
-                      {t('settings:instances.routing.notifyTarget', { defaultValue: 'Notification target' })}
-                    </div>
-                    <div data-testid={`instance-notify-${uid}`}>
-                      <AgentSelect
-                        value={notifyAgentId}
-                        options={agents}
-                        onChange={(_key, value) => {
-                          markDirty();
-                          setNotifyAgentId(typeof value === 'string' ? value : '');
-                        }}
-                        fieldKey="notifyAgentId"
-                        ariaLabel={t('settings:instances.routing.notifyTarget', {
-                          defaultValue: 'Notification target',
-                        })}
-                      />
-                    </div>
-                    <p className="text-[11px] text-fg-tertiary mt-1">
-                      {t('settings:instances.routing.notifyTargetHint', {
-                        defaultValue:
-                          'Approvals and notifications about this bot are delivered here. Leave empty to use the org secretary.',
-                      })}
-                    </p>
-                  </div>
-                )}
+                {/* The old “fallback: notify this agent” picker lived here. It
+                    was removed: it delivered notifications to an *agent’s own
+                    conversation* (a DM), which contradicts the one rule this
+                    area now enforces — approvals and notifications go to a
+                    group. A destination is declared in the panel above; a
+                    second, invisible terminus only made “where did it go?”
+                    unanswerable. */}
 
                 {!draft && (
-                  <div>
-                    <div className="text-xs font-medium text-fg-secondary mb-1.5">
-                      {t('settings:instances.routing.chats', { defaultValue: 'Chat bindings' })}
-                    </div>
+                  <div className={CARD}>
+                    <h4 className={`${CARD_TITLE} mb-1`}>
+                      {t('settings:instances.routing.chats', { defaultValue: 'Chat routing' })}
+                    </h4>
+                    <p className={`${HINT} mb-3`}>
+                      {t('settings:instances.routing.chatsHint', {
+                        defaultValue:
+                          'The agent bound above answers every chat by default. Route a specific chat to a different agent here.',
+                      })}
+                    </p>
 
                     {!instance.canListChannels && (
                       <p
                         className="text-[11px] text-fg-tertiary"
                         data-testid={`instance-chats-unsupported-${uid}`}
                       >
-                        {t('settings:instances.routing.unsupported', {
-                          defaultValue: 'This platform does not let us list its chats.',
-                        })}
+                        {/* The manifest explains *why* (slice U1); fall back to a
+                            generic line when the locale has no copy for it. */}
+                        {instance.channelsGuidance
+                          ? t(instance.channelsGuidance, {
+                              defaultValue: t('settings:instances.routing.unsupported', {
+                                defaultValue: 'This platform does not let us list its chats.',
+                              }),
+                            })
+                          : t('settings:instances.routing.unsupported', {
+                              defaultValue: 'This platform does not let us list its chats.',
+                            })}
                       </p>
                     )}
 
-                    {channelsError && (
-                      <p
-                        className="text-[11px] text-red-600 mb-2"
-                        data-testid={`instance-chats-error-${uid}`}
-                      >
-                        {channelsError}
-                      </p>
+                    {instance.canListChannels && (
+                      <div className="mb-2">
+                        <ChannelsRefresh
+                          loading={channelsLoading}
+                          error={channelsError}
+                          onReload={reloadChannels}
+                          empty={known.length === 0}
+                          buttonTestId={`instance-chats-refresh-${uid}`}
+                          errorTestId={`instance-chats-error-${uid}`}
+                        />
+                      </div>
                     )}
 
                     {instance.canListChannels && known.length > 0 && (
@@ -820,10 +1005,12 @@ export function InstanceCard({
             )}
           </section>
 
-          {/* 6 — A platform panel that asked to sit after the form. */}
-          {extrasEntry && extrasEntry.placement !== 'before' && extrasEntry.render(extrasCtx)}
+          {/* 7 — A platform panel that asked to sit after the form (and declares
+                 no guided method; a guided one is rendered in the connection
+                 section above). */}
+          {!offersGuided && extrasEntry && extrasEntry.placement !== 'before' && extrasEntry.render(extrasCtx)}
 
-          {/* 7 — Destructive, and last. */}
+          {/* 8 — Destructive, and last. */}
           {!draft && (
             <div className="pt-1">
               <button

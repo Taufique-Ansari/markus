@@ -44,6 +44,17 @@ export interface PlatformField {
   multiple?: boolean;
   /** Value the form starts from when nothing is stored yet. */
   default?: string | number | boolean | string[];
+  /**
+   * This field *declares* a notification destination, and of which kind.
+   *
+   * Mirrors the server annotation added in slice T4
+   * (`packages/comms/src/platforms/registry.ts`), which the outbound resolver
+   * scans to answer "where does a notification go?". The Settings UI reads the
+   * **same annotation** — see `lib/platformNotifications.ts` — so the platform
+   * that can *deliver* and the platform that can *be configured* are one list,
+   * not two. Never required: a destination must not gate "connected".
+   */
+  notifyTarget?: 'chat' | 'user';
 }
 
 export interface PlatformCapabilities {
@@ -63,6 +74,17 @@ export interface PlatformStatus {
   id: string;
   label: string;
   docsUrl?: string;
+  /**
+   * Development-only platform — the adapter exists and is unit-tested but the
+   * integration has not been verified end to end against the live service, so a
+   * production build must not offer it. Mirrors `PlatformManifest.devOnly`.
+   *
+   * A **presentation** gate, enforced in one place (`visiblePlatformIds`, driven
+   * by `import.meta.env.DEV`), not a capability gate: the manifest, adapter and
+   * API are unchanged, so a dev build can verify it and the flag can be flipped
+   * without touching anything else.
+   */
+  devOnly?: boolean;
   capabilities: PlatformCapabilities;
   fields: PlatformField[];
   defaultEnabled: boolean;
@@ -104,6 +126,12 @@ export const INTEGRATIONS_PATH = '/settings/integrations';
 export interface PlatformExtrasContext {
   /** The platform's id (e.g. `feishu`). */
   platformId: string;
+  /**
+   * This card's bot id; `undefined` while the card is a *new-bot draft* (no
+   * server row yet). Lets a panel act on the bot it belongs to — e.g. send a
+   * test message from that bot's own credentials.
+   */
+  instanceId?: string;
   /** The platform's status: manifest fields, secret presence, connection state. */
   status: PlatformStatus;
   /** The card's current draft, keyed by manifest field key. */
@@ -112,6 +140,29 @@ export interface PlatformExtrasContext {
   setValue: (key: string, value: unknown) => void;
   /** Re-read the platform from the server (e.g. after scan-to-register). */
   reload: () => void | Promise<void>;
+  /**
+   * The org's agents, so a panel that must bind one (Feishu's scan-to-create)
+   * can offer the same picker the card uses instead of an opaque id field.
+   * Typed structurally to keep this module free of a component import.
+   */
+  agents?: Array<{ id: string; name: string; role?: string }>;
+  /**
+   * Draft only: a panel that creates the bot server-side (the Feishu QR flow)
+   * calls this with the new id so the section swaps the draft for the real card
+   * — otherwise a successful scan just leaves the draft open next to the bot it
+   * created, looking as if nothing happened.
+   */
+  onCreated?: (id: string) => void;
+  /**
+   * Which setup method the card is showing. Present **only** for a platform that
+   * declares `guidedSetup`: the guided panel and the manual credential inputs are
+   * mutually exclusive, and the card owns the choice so it can also stop
+   * requiring (and hide) the fields the guided path supplies. `'manual'`
+   * otherwise.
+   */
+  setupMethod?: 'guided' | 'manual';
+  /** Switch setup method. Absent when the platform declares no `guidedSetup`. */
+  setSetupMethod?: (method: 'guided' | 'manual') => void;
 }
 
 /**
@@ -126,6 +177,15 @@ export interface PlatformExtras {
    */
   ownedFields?: string[];
   /**
+   * This panel offers a *guided* alternative to typing credentials by hand
+   * (Feishu's scan-to-create). `credentialFields` are the manifest keys the
+   * guided path supplies, so the card stops showing and requiring them while the
+   * guided method is chosen — the panel and the manual inputs are never on screen
+   * together. The card renders the method chooser and the manual inputs; the
+   * panel renders only the guided path.
+   */
+  guidedSetup?: { credentialFields: string[] };
+  /**
    * Where the panel sits inside the card. Default `'after'` (below the generic
    * form). `'before'` lifts a guided panel — e.g. Feishu's scan-to-create — to
    * the top, above the manual credentials, so the recommended path is seen
@@ -134,6 +194,18 @@ export interface PlatformExtras {
   placement?: 'before' | 'after';
   /** The panel. */
   render: (ctx: PlatformExtrasContext) => ReactNode;
+  /**
+   * Optional "send a test notification" control, rendered inside the generic
+   * `NotificationPanel` for this platform.
+   *
+   * The panel itself is written once and works for every platform, but only a
+   * platform whose backend exposes a real test-send endpoint can offer the
+   * button — so it is opt-in data here, exactly like the extras panel, rather
+   * than an `if (platform === …)` branch inside the panel. A platform without
+   * one still gets the destination form and the reachability verdict; delivery
+   * can always be proven by the generic two-way connection test.
+   */
+  sendTest?: (ctx: PlatformExtrasContext) => ReactNode;
 }
 
 // ─── Pure form logic ─────────────────────────────────────────────────────────

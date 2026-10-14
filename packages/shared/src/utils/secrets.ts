@@ -30,6 +30,7 @@ export const SECRET_ENV_KEYS: ReadonlySet<string> = new Set([
   'JWT_SECRET',
   'ADMIN_PASSWORD',
   'GATEWAY_SECRET',
+  'MARKUS_ACTION_SECRET',
   'DATABASE_URL',
 ]);
 
@@ -157,4 +158,25 @@ export function resolveGatewaySecret(): string {
   const fromEnv = process.env['GATEWAY_SECRET']?.trim();
   if (fromEnv && fromEnv !== DEV_GATEWAY_SECRET) return fromEnv;
   return loadOrCreateSecret('gateway-secret');
+}
+
+/**
+ * Resolve the approval **action-ref** signing secret — the HMAC key behind the
+ * opaque `ref` an approval card's buttons carry.
+ *
+ * Same rule as the other platform secrets: honour an explicit
+ * `MARKUS_ACTION_SECRET` env var, otherwise generate a random secret once and
+ * persist it at `~/.markus/action-secret` (0600). It is derived automatically
+ * on purpose: signing a card ref is a defence-in-depth backstop against a
+ * forged tap, not a concept the operator should have to configure.
+ *
+ * **One resolver, both halves of the contract.** The outbound gateway signs a
+ * ref with this key; the inbound action handler verifies it with the same call.
+ * If they resolved differently (e.g. one read the env var, the other the file) a
+ * legitimate tap would fail verification and resolve to nothing.
+ */
+export function resolveActionSecret(): string {
+  const fromEnv = process.env['MARKUS_ACTION_SECRET']?.trim();
+  if (fromEnv) return fromEnv;
+  return loadOrCreateSecret('action-secret');
 }

@@ -29,6 +29,7 @@ import {
   type MarkusConfig,
   pickOrgSecretary,
   setEnvValue,
+  resolveActionSecret,
 } from '@markus/shared';
 import {
   AgentManager,
@@ -80,8 +81,9 @@ import {
   recordInstanceVerification,
   type InstanceStoreDeps,
 } from '@markus/org-manager';
-import { MessageRouter, PLATFORM_MANIFESTS, setHttpFetch, getManifest, RepoBindingLookup, MAIN_CONVERSATION_KEY, verifyActionRef, ConnectionTestRegistry, type PlatformField, type PlatformManifest } from '@markus/comms';
+import { MessageRouter, PLATFORM_MANIFESTS, setHttpFetch, getManifest, RepoBindingLookup, MAIN_CONVERSATION_KEY, resolveCardActionValue, ConnectionTestRegistry, type PlatformField, type PlatformManifest } from '@markus/comms';
 import { setupOutboundDispatch } from './outbound.js';
+import { buildApprovalCardResolution, scheduleCardRewrite } from './approval-card.js';
 import { initStartupLogger, startupLog, startupBlank, startupSection, closeStartupLogger, getStartupLogFile } from '../utils/logger.js';
 import { openBrowserAfterHealthCheck } from '../utils/browser.js';
 import { StartupProgress } from '../utils/startupProgress.js';
@@ -221,6 +223,132 @@ function botLabel(manifest: PlatformManifest, instanceLabel: string): string {
 }
 
 /**
+ * The one "make this bot match its persisted config" operation.
+ *
+ * Startup and the Settings API both funnel through here, so a bot that existed
+ * at boot and a bot saved afterwards cannot take different code paths — the
+ * structural fix for "a newly configured bot needs a restart before it works".
+ *
+ * Registers the adapter on first use (setup only ever registered at boot, which
+ * is why a bot created later had no adapter to connect), then connects it; when
+ * the bot is off or unconfigured it is dropped instead, so a disabled or deleted
+ * bot cannot keep a live socket.
+ */
+async function applyInstanceConfig(
+  router: MessageRouter,
+  manifest: PlatformManifest,
+  instanceId: string,
+  resolved: Record<string, unknown>,
+  enabled: boolean,
+): Promise<boolean> {
+  if (!enabled) {
+    await router.unregisterInstance(instanceId);
+    return false;
+  }
+  if (!router.hasInstance(instanceId)) {
+    router.registerAdapter(manifest.createAdapter(), instanceId);
+  }
+  return router.connectInstance(instanceId, { platform: manifest.id, ...resolved, instanceId });
+}
+
+/**
+ * Structural view of the persisted bot rows the reconciler needs (`platform_instances`).
+ * Narrow on purpose: a storage row is assignable without a cast, and tests can
+ * pass a literal.
+ */
+export interface ReconcilableInstanceRepo {
+  findById(id: string): PersistedBotInstance | undefined;
+  listByPlatform(orgId: string, platform: string): PersistedBotInstance[];
+}
+
+export interface CreateInstanceReconcilerOptions {
+  router: MessageRouter;
+  /**
+   * The manifests to reconcile against — the **same list** startup is given, so
+   * the two paths can never disagree about a platform's fields. Falls back to the
+   * global registry only when omitted.
+   */
+  manifests?: readonly PlatformManifest[];
+  /** Desired state: the persisted bot rows. Absent ⇒ nothing can be reconciled. */
+  instanceRepo?: ReconcilableInstanceRepo;
+  orgId: string;
+  /** `markus.json` `integrations` section — the read-only bootstrap fallback. */
+  sections?: Record<string, unknown>;
+  /** Persisted platform-level (legacy) values, when the caller has just saved some. */
+  storedPlatformValues?: (platformId: string) => Record<string, unknown> | undefined;
+}
+
+/**
+ * Runtime reconciliation of a bot's live adapter against its persisted config.
+ *
+ * The adapter set is *derived* state — it must equal what the instance rows say.
+ * Startup derives it once; these two entry points re-derive it after a change, so
+ * saving Settings takes effect immediately instead of at the next restart. Keep
+ * the mapping 1:1 — one method per way the desired state can change.
+ */
+export interface InstanceReconciler {
+  /** Re-derive one bot from its row (or drop it when the row is gone/disabled). */
+  syncInstance(instanceId: string): Promise<void>;
+  /** Re-derive a platform: every instance of it, or the legacy implicit bot. */
+  syncPlatform(platform: string, overrides?: Record<string, unknown>): Promise<void>;
+}
+
+/**
+ * Build the runtime reconciler. It reads the same inputs startup does
+ * (`sections` = markus.json bootstrap, row config = stored credentials), so the
+ * two can never disagree about what a bot's config *is*.
+ */
+export function createInstanceReconciler(opts: CreateInstanceReconcilerOptions): InstanceReconciler {
+  const { router, instanceRepo, orgId } = opts;
+  const sections = opts.sections ?? {};
+  // Same resolution order as startup: the injected list first, registry second.
+  const manifestIndex = new Map((opts.manifests ?? []).map((manifest) => [manifest.id, manifest]));
+  const manifestOf = (platformId: string): PlatformManifest | undefined =>
+    manifestIndex.get(platformId) ?? getManifest(platformId);
+
+  const configOf = (row: PersistedBotInstance | undefined): Record<string, unknown> =>
+    row?.config && typeof row.config === 'object' ? (row.config as Record<string, unknown>) : {};
+
+  const syncInstance = async (instanceId: string): Promise<void> => {
+    const row = instanceRepo?.findById(instanceId);
+    const manifest = row ? manifestOf(row.platform) : undefined;
+    // Deleted row or unknown platform ⇒ the live adapter must go too, or a
+    // removed bot keeps a socket and a stale entry in `getInstances`.
+    if (!row || !manifest) {
+      await router.unregisterInstance(instanceId);
+      return;
+    }
+    const resolved = resolveManifestConfig(manifest, sections, undefined, configOf(row));
+    const enabled = row.enabled !== false && isManifestEnabled(manifest, resolved);
+    await applyInstanceConfig(router, manifest, instanceId, resolved, enabled);
+  };
+
+  const syncPlatform = async (platform: string, overrides?: Record<string, unknown>): Promise<void> => {
+    const rows = instanceRepo?.listByPlatform(orgId, platform) ?? [];
+    if (rows.length > 0) {
+      // Instances define this platform's connections (design §4.2) — re-derive
+      // each one rather than patching a platform-level adapter that no longer
+      // owns the connection.
+      for (const row of rows) await syncInstance(row.id);
+      return;
+    }
+    // Legacy fallback: no instance row ⇒ the implicit bot whose id is the
+    // platform id. Freshly saved values ride in as an overlay (they win over the
+    // bootstrap file), matching the old reconnect-the-platform behaviour.
+    const manifest = manifestOf(platform);
+    if (!manifest) {
+      await router.unregisterInstance(platform);
+      return;
+    }
+    const stored = opts.storedPlatformValues?.(platform);
+    const resolved = resolveManifestConfig(manifest, sections, overrides, stored);
+    await applyInstanceConfig(router, manifest, platform, resolved, isManifestEnabled(manifest, resolved));
+  };
+
+  return { syncInstance, syncPlatform };
+}
+
+/**
  * Build, register and connect every enabled bot in `manifests`.
  *
  * A **platform** is a manifest; a **bot** is one instance of it. This walks the
@@ -252,12 +380,10 @@ export async function connectConfiguredPlatforms(opts: ConnectPlatformsOptions):
     resolved: Record<string, unknown>,
   ): Promise<void> => {
     try {
-      const adapter = manifest.createAdapter();
-      router.registerAdapter(adapter, instanceId);
-      // connectAll owns the onMessage wiring and swallows connect errors, so the
-      // adapter's own isConnected() is the authoritative outcome.
-      await router.connectAll([{ platform: manifest.id, ...resolved, instanceId }]);
-      results.push({ id: instanceId, label, connected: adapter.isConnected() });
+      // `connectOne` is only ever called for a bot that should be up, so the
+      // enablement decision is already made by the caller.
+      const connected = await applyInstanceConfig(router, manifest, instanceId, resolved, true);
+      results.push({ id: instanceId, label, connected });
     } catch (error) {
       results.push({ id: instanceId, label, connected: false, error: String(error) });
     }
@@ -658,13 +784,27 @@ export async function createServices(config: ReturnType<typeof loadConfig>) {
     log.info('Feishu MCP server configured', { presets, localBin: !!larkMcpBin });
   }
 
+  // The Feishu tool's default destination is a *notification-related* field, so
+  // it reads the same single source as the outbound dispatcher: the DB
+  // `platform_instances.config` that Settings writes. The legacy `markus.json`
+  // `integrations.feishu.notifyChatId` / `notifyOpenId` read is gone (R2), so
+  // the file no longer shadows the DB for this fact.
+  const feishuNotifyConfig = (storage?.platformInstanceRepo?.listByOrg('default') ?? []).find(
+    (instance: { platform: string; config?: Record<string, unknown> | null }) => instance.platform === 'feishu',
+  )?.config;
   const feishuToolsConfig = (feishuAppId && feishuAppSecret)
     ? {
         appId: feishuAppId,
         appSecret: feishuAppSecret,
         domain: feishuIntegration?.domain,
-        defaultChatId: typeof feishuIntegration?.notifyChatId === 'string' ? feishuIntegration.notifyChatId : undefined,
-        defaultOpenId: typeof feishuIntegration?.notifyOpenId === 'string' ? feishuIntegration.notifyOpenId : undefined,
+        defaultChatId:
+          typeof feishuNotifyConfig?.['notifyChatId'] === 'string'
+            ? (feishuNotifyConfig['notifyChatId'] as string)
+            : undefined,
+        defaultOpenId:
+          typeof feishuNotifyConfig?.['notifyOpenId'] === 'string'
+            ? (feishuNotifyConfig['notifyOpenId'] as string)
+            : undefined,
       }
     : undefined;
 
@@ -2282,22 +2422,13 @@ async function startServerCore(
       ((payload['action'] as Record<string, unknown> | undefined)?.['value'] as
         | Record<string, unknown>
         | undefined) ?? (payload['value'] as Record<string, unknown> | undefined) ?? {};
-    const rawRef =
-      typeof value['ref'] === 'string'
-        ? value['ref']
-        : typeof value['token'] === 'string'
-          ? value['token']
-          : undefined;
-    const actionSecret = process.env['MARKUS_ACTION_SECRET'];
-    if (rawRef && !actionSecret) {
-      log.warn('MARKUS_ACTION_SECRET not set — approval action refs are unverified');
+    const { approvalId, command, unverified } = resolveCardActionValue(
+      value,
+      resolveActionSecret(),
+    );
+    if (unverified) {
+      log.warn('MARKUS_ACTION_SECRET not set — accepted an unverified approval action ref');
     }
-    const verified = rawRef && actionSecret ? verifyActionRef(rawRef, actionSecret) : undefined;
-    const approvalId =
-      verified?.approvalId ??
-      (typeof value['approvalId'] === 'string' ? value['approvalId'] : undefined);
-    const command =
-      verified?.action ?? (typeof value['action'] === 'string' ? value['action'] : undefined);
     if (!approvalId || !command) {
       log.warn('Platform action did not resolve to an approval — ignoring', {
         platform: action.platform,
@@ -2305,9 +2436,65 @@ async function startServerCore(
       });
       return;
     }
-    const approved = command === 'approve' || command === 'approve_task';
-    hitlService.respondToApproval(approvalId, approved, action.actorId || 'platform-action');
+    // Mirror UserInputModal: a named option is affirmative unless it is a reject;
+    // the tapped option id is recorded as `selectedOption` (was silently dropped).
+    const approved = command !== 'reject' && command !== 'request_changes';
+    const resolved = hitlService.respondToApproval(
+      approvalId,
+      approved,
+      action.actorId || 'platform-action',
+      undefined,
+      command,
+    );
     log.info('Platform action resolved', { approvalId, command, platform: action.platform });
+
+    // Feedback: rewrite the card the tap came from. One invariant, two paths —
+    // *the card must converge to the approval's authoritative state*:
+    //  · `resolved` — this tap recorded the decision;
+    //  · otherwise — the approval was already terminal (idempotent re-tap):
+    //    re-read the record and rewrite anyway, so a stale card (client clobber,
+    //    an earlier failed PATCH) self-heals on the next tap.
+    // Timing: Feishu re-renders the tapper's client with the clicked-time card
+    // when the callback responds, so the PATCH must run AFTER the ack — observed
+    // 2026-10-13 as "card flashed resolved, then snapped back to buttons" while
+    // the server kept the resolved card (GET-message probe). Scheduling the
+    // rewrite (not awaiting it inside this handler) makes it the last write the
+    // client applies. Best-effort: failures are logged, never fatal, never roll
+    // the decision back.
+    const approval = resolved ?? hitlService.getApproval(approvalId);
+    const messageId = action.messageId;
+    if (approval && messageId) {
+      void scheduleCardRewrite(async () => {
+        // Resolve the display name inside the post-ack rewrite: it is a network
+        // round-trip to the contact API, so it must never delay the callback
+        // ack. Best-effort — null keeps the raw id, which is always correct.
+        const actorName = action.actorId
+          ? await messageRouter.resolveActorName(action.platform, action.instanceId, action.actorId)
+          : null;
+        const updated = await messageRouter.updateResolvedCard(
+          action.platform,
+          action.instanceId,
+          messageId,
+          buildApprovalCardResolution(approval, {
+            actorId: action.actorId,
+            actorName: actorName ?? undefined,
+            tappedOption: command,
+          }),
+        );
+        if (!updated) {
+          log.info('Card left as-is — platform cannot edit a sent message', {
+            approvalId,
+            platform: action.platform,
+          });
+        }
+      }, (error) => {
+        log.warn('Failed to rewrite the approval card after the decision', {
+          approvalId,
+          platform: action.platform,
+          error: String(error),
+        });
+      });
+    }
   });
 
   // ── Step 5: Gateway (manifest-driven) ─────────────────────────────────────
@@ -2421,9 +2608,27 @@ async function startServerCore(
 
   // Live connection state + runtime reconfigure come from the gateway (slice G6):
   // the router's adapters are the single owner of "is this platform connected".
+  //
+  // The reconciler is the runtime half of the startup derivation above: saving a
+  // bot in Settings now re-derives *that* bot (register + connect, or drop it)
+  // instead of asking the user to restart the process.
+  const instanceReconciler = createInstanceReconciler({
+    router: messageRouter,
+    manifests: PLATFORM_MANIFESTS,
+    instanceRepo: storage?.platformInstanceRepo,
+    orgId: 'default',
+    sections: (config.integrations ?? {}) as Record<string, unknown>,
+    storedPlatformValues: (platformId) => {
+      const manifest = getManifest(platformId);
+      if (!manifest || !integrationRepo) return undefined;
+      return readStoredPlatformConfig({ orgId: 'default', repo: integrationRepo }, manifest)?.values;
+    },
+  });
+
   apiServer.setPlatformRuntimeHooks({
     connected: (platform) => messageRouter.isPlatformConnected(platform),
-    sync: (platform, config) => messageRouter.reconnectPlatform(platform, config),
+    sync: (platform, platformConfig) => instanceReconciler.syncPlatform(platform, platformConfig),
+    syncInstance: (instanceId) => instanceReconciler.syncInstance(instanceId),
     connectionTest: {
       begin: (instanceId, platform, target) => connectionTests.begin(instanceId, platform, target),
       get: (instanceId) => connectionTests.get(instanceId) ?? null,
@@ -2436,40 +2641,38 @@ async function startServerCore(
     connectedLabels.length > 0 ? `webhook adapters: ${connectedLabels.join(' + ')}` : 'webhook adapters: none';
   progress?.complete(5, failedLabels.length > 0 ? `${gatewayDetail} (${failedLabels.join(', ')} failed)` : gatewayDetail);
 
-  // ── Outbound dispatch: three-level notification routing (G4, design §7) ────
+  // ── Outbound dispatch: notification/approval routing (G4, design §7) ───────
   // Every approval/notification goes through one dispatcher, resolved
-  // `agent → instance → global(Secretary)` and rendered to whatever the target
-  // platform can show. This is what makes a non-Feishu platform a first-class
-  // notification destination instead of a silent dead end (defect D5).
-  const feishuNotifySection = (config.integrations as Record<string, unknown> | undefined)?.['feishu'] as
-    | Record<string, unknown>
-    | undefined;
-  const legacyNotifyChatId =
-    typeof feishuNotifySection?.['notifyChatId'] === 'string'
-      ? (feishuNotifySection['notifyChatId'] as string)
-      : undefined;
+  // `agent → instance(declared) → instance(agent) → global(Secretary)` and
+  // rendered to whatever the target platform can show. This is what makes a
+  // non-Feishu platform a first-class notification destination instead of a
+  // silent dead end (defect D5).
+  //
+  // The destination is read from the DB — `platform_instances.config` plus
+  // `channel_bindings` — the single source Settings writes. The legacy
+  // `markus.json` `integrations.feishu.notifyChatId` read is gone (R2, design §3
+  // "Single source of truth"), so the configured fact and the consumed fact are
+  // the same fact.
   const outbound = setupOutboundDispatch({
     router: messageRouter,
     bindingRepo: storage?.channelBindingRepo,
     instanceRepo: storage?.platformInstanceRepo,
     orgSecretaryId: () => orgService.findOrgSecretary()?.id,
-    legacyNotifyTarget: (orgId) => {
-      if (orgId !== 'default' || !legacyNotifyChatId) return undefined;
-      // Legacy single-bot install: the Feishu bot's implicit instance id is the
-      // platform id (G2), so this keeps pre-G4 installs delivering unchanged.
-      const feishuInstance = persistedInstances.find((i: { platform: string }) => i.platform === 'feishu');
-      return {
-        platform: 'feishu',
-        instanceId: feishuInstance?.id ?? 'feishu',
-        nativeId: legacyNotifyChatId,
-        kind: 'notification',
-      };
-    },
     notificationSource: hitlService,
     eventBus: agentManager.getEventBus(),
     orgId: 'default',
     digestInfo: false,
-    actionSecret: process.env['MARKUS_ACTION_SECRET'],
+    actionSecret: resolveActionSecret(),
+    // Resolve the origin agent's display name so a notification landing in a
+    // shared group says which agent sent it. A lookup failure must never hold
+    // back a delivery — an unknown agent simply goes out unattributed.
+    agentName: (id) => {
+      try {
+        return agentManager.getAgent(id)?.config?.name;
+      } catch {
+        return undefined;
+      }
+    },
   });
   if (outbound) {
     startupLog('OK', '出站通知分发已接线（三级路由：agent → instance → 全局）');

@@ -211,6 +211,49 @@ describe('FeishuAdapter', () => {
 
       expect(mockClient.sendTextMessage).toHaveBeenCalledWith('oc_channel', 'Hello', 'open_id');
     });
+
+    it("should build an interactive card (with signed-ref buttons) when format is 'card'", async () => {
+      await adapter.sendMessage('oc_channel', 'plain projection', {
+        format: 'card',
+        receiveIdType: 'open_id',
+        card: {
+          title: '审批请求',
+          body: '请批准部署',
+          actions: [
+            { id: 'approve', label: '批准', style: 'primary', ref: 'signed.ref.1' },
+            { id: 'reject', label: '驳回', style: 'danger', ref: 'signed.ref.2' },
+          ],
+        },
+      });
+
+      expect(mockClient.sendInteractiveMessage).toHaveBeenCalledTimes(1);
+      const [, card, idType] = (mockClient.sendInteractiveMessage as unknown as { mock: { calls: unknown[][] } }).mock
+        .calls[0] as [string, Record<string, unknown>, string];
+      // The receive-addressing type is honoured (R4) — not the old hard-coded chat_id.
+      expect(idType).toBe('open_id');
+      expect(card).toMatchObject({
+        header: { title: { tag: 'plain_text', content: '审批请求' } },
+      });
+      // The card carries tappable buttons whose value is the signed ref — the
+      // inbound side verifies it; the raw approval id is nowhere in the card.
+      const elements = card['elements'] as Array<Record<string, unknown>>;
+      const actionRow = elements.find((e) => e['tag'] === 'action') as { actions: Array<Record<string, unknown>> };
+      expect(actionRow.actions.map((b) => b['value'])).toEqual([
+        { ref: 'signed.ref.1', action: 'approve' },
+        { ref: 'signed.ref.2', action: 'reject' },
+      ]);
+      expect(JSON.stringify(card)).not.toContain('apr_');
+    });
+
+    it("does not build a notification card when format is 'card' but no card content is supplied", async () => {
+      await adapter.sendMessage('oc_channel', 'Hello', { format: 'card', markdown: true });
+      // No structured card → degrade to Feishu's markdown card (still interactive),
+      // never a crash and never a lost message. It carries no action buttons.
+      expect(mockClient.sendInteractiveMessage).toHaveBeenCalledTimes(1);
+      const card = (mockClient.sendInteractiveMessage as unknown as { mock: { calls: unknown[][] } }).mock
+        .calls[0]![1] as Record<string, unknown>;
+      expect((card['elements'] as Array<Record<string, unknown>>).some((e) => e['tag'] === 'action')).toBe(false);
+    });
   });
 
   describe('sendCard', () => {

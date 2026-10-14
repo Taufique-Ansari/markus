@@ -572,6 +572,22 @@ raw `approval_id`, then calling `hitlService.respondToApproval`. One inbound
 funnel, but two *kinds* of inbound (message vs action) with an explicit decision
 point each.
 
+**A tap must leave visible evidence, so the card is rewritten in place.** An
+interactive card is a one-shot message — the platform never edits it for us — so a
+tap that only records the decision leaves the tapper staring at a card that looks
+untouched (the "clicked approve and nothing happened" defect). After the decision
+is recorded, the wiring layer calls `router.updateResolvedCard(platform,
+instanceId, messageId, resolution)`: the adapter re-renders the same card with its
+action row replaced by a status line (`✅ 已批准` / `❌ 已驳回`, actor, time) and the
+header recoloured by outcome. The message id comes from the action itself
+(Feishu `context.open_message_id`, carried on `InboundAction.messageId`), and the
+title/body are re-read from the approval record — never scraped back out of the
+card. Two contract rules make this safe: the capability is **optional** on
+`CommAdapter` (a platform that cannot edit messages simply omits it, and
+`updateResolvedCard` returns `false` rather than throwing), and it is
+**best-effort** (a failed rewrite is logged, never rolls back a decision that is
+already recorded).
+
 **What is deleted.** `packages/org-manager/src/feishu-notifier.ts` in full; the
 `handleFeishuUserMessage` method and its `getOrCreateMainSession` call (the
 session choice is now the resolver's, §6.1); the notifier's outbound duties (the
@@ -664,39 +680,46 @@ EventBus (task:*, …) ─┼─▶ OutboundDispatcher ─▶ resolve target(s) 
   the existing card-action `approval_id`); the inbound side resolves it to the
   pending approval, so the user never sees an internal id.
 
-### 7.3 Notification routing — three levels, the last one always wins
+### 7.3 Notification routing — an ordered walk that ends loudly
 
-A notification resolves its destination by walking up the chain, **first hit wins**:
+A notification resolves its destination by walking the chain, **first hit wins**.
+The full design (model, fidelity, preference enforcement, tests) is
+`notification-delivery.md`; in brief:
 
 1. **agent** — the producing agent's **own conversation**. An explicit
    `kind = 'notification'` binding wins; otherwise the agent's own channel is used.
    (The agent's channel *is* its notification target — routing and notification
    cannot disagree, because they read the same row.)
-2. **instance** — a notification sink declared on the instance the agent works in.
-   Either an explicit `kind = 'notification'` binding with a native id, **or** the
-   instance's **notification-target agent** (`platform_instances.config.notifyAgentId`,
-   set by the Settings UI): *the sink is that agent's own conversation*. Lets an
-   operator say "everything on the sales bot notifies here" without per-agent rows;
-   blank ⇒ nothing declared ⇒ fall through to `global` (the UI's "leave empty to use
-   the org secretary"). `RepoNotifyTargetLookup.instanceTarget` is the one reader.
-3. **global** — the **Secretary's own conversation**, else the platform's legacy
-   notify channel (`notifyChatId`).
+2. **instance (declared)** — the instance's **declared destination**, read from
+   `platform_instances.config` through the manifest's `notifyTarget` annotation (a
+   group chat the bot was added to). Binding-independent, so it is the reliable
+   terminus even on a fresh install. `RepoNotifyTargetLookup.instanceTarget` is the
+   one reader.
+3. **instance (fallback)** — the instance's `notifyAgentId` → that agent's own
+   conversation (best-effort).
+4. **global** — the **Secretary's own conversation**, else any global-scope binding
+   with a native id.
+5. **no terminus** — the dispatcher reports `{ delivered: false, reason:
+   'no-notify-target' }` (one log line, surfaced in Settings): a **visible**
+   undelivered state, never a silent drop.
 
-Level 3 always exists, so **a notification can never be orphaned**. This is the
-mechanism that satisfies the requirement — "everything goes through the Secretary
-channel by default, but I can point a specific agent elsewhere" — **without** ever
-regressing into "the agent wasn't bound, so the notification vanished".
+Unlike the earlier three-level sketch, level "always exists" is **not** assumed. An
+install with no destination and no addressable Secretary binding produces the loud
+undelivered state above; the Settings notification panel is what configures level 2.
+This satisfies the requirement — "everything goes through the Secretary channel by
+default, but I can point a specific bot elsewhere" — **without** ever regressing
+into "the agent wasn't bound, so the notification vanished".
 
 > **Why level 1 accepts a non-marker binding.** The migration seeds routing
 > bindings with `kind = NULL` — at migration time there is no way to know *which*
 > conversation should receive notifications, so no row can honestly claim the
-> marker. Requiring `kind = 'notification'` would therefore leave levels 1 and 3
+> marker. Requiring `kind = 'notification'` would therefore leave levels 1 and 4
 > dead on **every migrated install**, i.e. notifications *would* be isolated — the
 > exact defect this design removes. Preference order instead makes an explicit
-> choice made in Settings supreme while guaranteeing a terminus. Verified on live data:
-> the real-data probe asserts the Secretary's real binding resolves level 3.
+> choice made in Settings supreme while guaranteeing a terminus.
 
-Every forwarded message carries `origin{agentId, taskId}` so that one busy
+Every forwarded message carries `origin{agentId, taskId}`, and the body is prefixed
+with the producing agent's name at the single delivery point so that one busy
 Secretary channel stays readable while aggregating the whole org.
 
 Optional (later): per-severity targets (`action_required` → an urgent channel).
@@ -725,20 +748,30 @@ first, then the urgent message goes on its own.
 
 **Three-level notify routing** (`resolveNotifyTarget(orgId, origin, lookup)`) walks
 `agent → instance → global` and stops at the first hit, recording which level
-matched. The lookup (`RepoNotifyTargetLookup`, backed by `channel_bindings`) supplies
-each level; level 3 is the *Secretary channel*. A notification can never be orphaned
-by "the agent was not bound". If even level 3 is missing the dispatcher logs loudly
-and reports `delivered: false` — it never pretends success. **Honest gap:** a live
-install whose Secretary has no addressable binding *and* no legacy `notifyChatId`
-has no level-3 terminus; the dispatcher reports it as undeliverable rather than
-swallowing the notification, and the Settings notification-target field is what
-configures it.
+matched. The lookup (`RepoNotifyTargetLookup`) supplies each level from
+`platform_instances.config` (the instance's declared destination, then its
+`notifyAgentId` fallback) and from `channel_bindings` (the agent's and the
+global/Secretary rows). A notification can never be orphaned *by "the agent was not
+bound"*. If no level yields an addressable terminus the dispatcher logs loudly and
+reports `delivered: false` — it never pretends success. **Designed state, not a gap:**
+a bot with no group destination and no addressable Secretary binding is simply
+**unconfigured**; the Settings notification panel is what configures level 2, and the
+undelivered state is the loud signal to do so (`notification-delivery.md` §2).
 
-**Action refs are signed.** With `actionSecret` set, an approval notification's
-action refs are opaque signed tokens (`signActionRef`/`verifyActionRef`, base64url
-payload + `sha256` HMAC, constant-time compare) — the internal approval id never
-leaves in the clear. Without a secret the raw id is used, which is flagged as a
-configuration gap on the wiring, not silently accepted as equivalent.
+**Action refs are signed, and the signing key is derived automatically.** An
+approval notification's action refs are opaque signed tokens
+(`signActionRef`/`verifyActionRef`, base64url payload + `sha256` HMAC,
+constant-time compare) — the internal approval id never leaves in the clear. Both
+halves of the contract call the *same* resolver, `resolveActionSecret()`
+(`@markus/shared`): an explicit `MARKUS_ACTION_SECRET` env var wins; otherwise a
+random secret is generated once and persisted at `~/.markus/action-secret` (0600),
+exactly like `resolveJwtSecret` / `resolveGatewaySecret`. **The operator never
+configures it** — signing a card ref is a defence-in-depth backstop against a
+forged or replayed tap, not a concept a user should have to understand. Signing is
+*not* the trust boundary: the inbound webhook / long-connection is authenticated by
+the platform itself (Feishu `verificationToken` / `encryptKey`). If the resolver
+ever returned different values on the two sides, a legitimate tap would fail
+verification and resolve to nothing — hence one resolver, not two env reads.
 
 **Capability degradation** is a total function: `cards|buttons → 'card'`,
 `markdown → 'markdown'`, otherwise `'text'`. The plain-text projection always
@@ -980,12 +1013,16 @@ gateway sessions and Telegram long polling against live services are unproven.
 desktop install does not have.
 - `connected` has a real source only for Feishu.
 
+**Therefore Slack, WhatsApp and Discord are marked `devOnly` in the registry**:
+their adapters and manifests stay in the tree (unit-tested, and exercised in
+development), but a production build does not offer them in Settings. The gate is
+presentation-only and lives in one place — `visiblePlatformIds`, driven by
+`import.meta.env.DEV` — so promoting a platform after live verification is a
+one-line flag flip, pinned by `platform-registry.test.ts` (see
+`packages/comms/docs/platform-manifest.md` → *Development-only platforms*).
+
 **Deliberately not delivered:**
 
-- Feishu approval buttons render as text (`[label] ref`) because the Feishu manifest
-declares `cards: false`. The action port, signature verification and
-`respondToApproval` wiring exist and are tested; making the buttons clickable is a
-manifest/capability change.
 - Slack `slash_commands` / `interactive` envelopes are ACKed and logged, not
 projected into agent turns.
 - The legacy notifier's **rich agent-response card streaming** has no equivalent in
@@ -993,11 +1030,12 @@ the gateway — the request/reply path returns text (§6.5).
 - `getOrCreateMainSession` / `MAIN_CONVERSATION_KEY` and the DB main session (`cs_*`)
 remain two facts.
 
-**Production should set `MARKUS_ACTION_SECRET`.** Unset, approval action refs are
-bare ids (the previous behaviour) and the dispatcher logs a warning. Independently, an
-install whose Secretary has no addressable binding has no level-3 terminus: the
-dispatcher reports it as undeliverable rather than swallowing it (§7.4), and the
-Settings notification-target field is what configures it.
+**`MARKUS_ACTION_SECRET` is derived, not configured.** It is resolved through
+`resolveActionSecret()` — an explicit env var when set, otherwise a random secret
+generated once at `~/.markus/action-secret`. Nothing in the product surfaces it.
+Independently, an install whose Secretary has no addressable binding has no
+terminus: the dispatcher reports it as undeliverable rather than swallowing it
+(§7.3), and the Settings notification destination is what configures it.
 
 **Operational trap found, not fixed here (pre-existing):** `initSqliteStorage`
 swallows *all* errors and returns `null`, so a repository-wiring programming error

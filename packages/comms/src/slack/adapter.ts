@@ -1,6 +1,14 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createLogger, msgId, type Message } from '@markus/shared';
-import type { CommAdapter, CommAdapterConfig, IncomingMessageHandler, SendOptions } from '../adapter.js';
+import type {
+  CommAdapter,
+  CommAdapterConfig,
+  InboundAction,
+  InboundActionHandler,
+  IncomingMessageHandler,
+  SendCard,
+  SendOptions,
+} from '../adapter.js';
 import { SlackClient, type SlackClientConfig, type SlackEventEnvelope, type SlackEvent } from './client.js';
 import {
   SlackSocketMode,
@@ -12,6 +20,41 @@ import { activeInboundMode, getManifest, type PlatformCapabilities } from '../pl
 import { renderMarkdown } from '../render/markdown.js';
 
 const log = createLogger('slack-adapter');
+
+/** Narrow an unknown to a record, or undefined — for reading raw platform payloads. */
+function attemptRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : undefined;
+}
+
+/**
+ * Build a Block Kit payload from the gateway's platform-neutral card content
+ * (slice T2). Slack renders rich cards as blocks; each action button carries its
+ * signed `ref` as the button `value`, so a tap reaches the inbound action port
+ * and completes the approval — the same loop Feishu's interactive card drives.
+ */
+function buildNotificationBlocks(card: SendCard): { blocks: unknown[]; text: string } {
+  const blocks: unknown[] = [
+    { type: 'header', text: { type: 'plain_text', text: card.title, emoji: true } },
+    { type: 'section', text: { type: 'mrkdwn', text: card.body } },
+  ];
+
+  const actions = (card.actions ?? []).filter((a) => a.ref);
+  if (actions.length > 0) {
+    blocks.push({
+      type: 'actions',
+      elements: actions.map((a) => ({
+        type: 'button',
+        text: { type: 'plain_text', text: a.label, emoji: true },
+        action_id: a.id,
+        // The signed, opaque ref — verified inbound; never the raw approval id.
+        value: a.ref,
+        ...(a.style ? { style: a.style } : {}),
+      })),
+    });
+  }
+
+  return { blocks, text: `${card.title}\n${card.body}` };
+}
 
 export interface SlackAdapterConfig extends CommAdapterConfig {
   platform: 'slack';
@@ -58,6 +101,13 @@ export class SlackAdapter implements CommAdapter {
   private config?: SlackAdapterConfig;
   private client?: SlackClient;
   private handlers: IncomingMessageHandler[] = [];
+  /**
+   * Action port (design §6.5). A Block Kit button tap is a HITL state transition,
+   * not a conversation, so it is handed to the registered action handler rather
+   * than faked into a `Message`. This is what makes a card's buttons *tappable*
+   * on the inbound side, closing the send-fidelity loop (slice T2).
+   */
+  private actionHandlers: InboundActionHandler[] = [];
   private server?: ReturnType<typeof createServer>;
   private socketMode?: SlackSocketMode;
   private connected = false;
@@ -147,6 +197,22 @@ export class SlackAdapter implements CommAdapter {
       if (options?.threadId) {
         slackOptions.thread_ts = options.threadId;
       }
+
+      // Slice T2 — the renderer chose a card and handed us platform-neutral
+      // content: send a real Block Kit card (header + body + a row of buttons)
+      // instead of degrading every notification to plain text.
+      if (options?.format === 'card' && options.card) {
+        const { blocks, text } = buildNotificationBlocks(options.card);
+        const messageId = await this.client.sendBlocksMessage(
+          channelId,
+          blocks,
+          options.markdown ? renderMarkdown(text, 'mrkdwn') : text,
+          slackOptions,
+        );
+        log.info(`Slack notification card sent to channel ${channelId}: ${messageId}`);
+        return messageId;
+      }
+
       // Slack speaks mrkdwn, not markdown: `**bold**` would render with literal
       // asterisks. `renderMarkdown` maps the dialect (and escapes `<`/`>` so an
       // agent's prose cannot inject a Slack link or mention).
@@ -222,6 +288,16 @@ export class SlackAdapter implements CommAdapter {
 
   onMessage(handler: IncomingMessageHandler): void {
     this.handlers.push(handler);
+  }
+
+  /**
+   * Action port (design §6.5). A Block Kit button tap arrives as an `interactive`
+   * envelope; the adapter normalises it into an {@link InboundAction} so the
+   * wiring layer can verify the signed ref and resolve the approval — the same
+   * downstream path a Feishu card tap takes.
+   */
+  onAction(handler: InboundActionHandler): void {
+    this.actionHandlers.push(handler);
   }
 
   isConnected(): boolean {
@@ -329,8 +405,14 @@ export class SlackAdapter implements CommAdapter {
       await this.processEvent(callback.event);
       return;
     }
-    // slash_commands / interactive carry platform-unique payloads; they are a
-    // capability, not a message — nothing to project yet (see capabilities.extra).
+    // `interactive` carries a Block Kit action (button tap) — a HITL transition,
+    // routed to the action port rather than the conversation handler (slice T2).
+    if (envelope.type === 'interactive') {
+      await this.processInteractive(payload as Record<string, unknown>);
+      return;
+    }
+    // slash_commands / other platform-unique payloads remain an unimplemented
+    // capability (see capabilities.extra) — nothing to project yet.
     log.debug(`Slack socket envelope '${envelope.type}' carries no channel message`);
   }
 
@@ -387,6 +469,51 @@ export class SlackAdapter implements CommAdapter {
         } catch (error) {
           log.error('Slack message handler failed', { error });
         }
+      }
+    }
+  }
+
+  /**
+   * Normalise a Slack Block Kit action (button tap) into the gateway's action
+   * port. The signed ref the card carried in the button `value` is preserved and
+   * the actor is the Slack user — the wiring layer verifies the ref and calls
+   * `respondToApproval`.
+   */
+  private async processInteractive(payload: Record<string, unknown>): Promise<void> {
+    if (payload['type'] !== 'block_actions') return;
+
+    const actions = Array.isArray(payload['actions'])
+      ? (payload['actions'] as Array<Record<string, unknown>>)
+      : [];
+    const first = actions[0];
+    if (!first) return;
+
+    const ref = typeof first['value'] === 'string' ? first['value'] : undefined;
+    if (!ref) return;
+    const commandId = typeof first['action_id'] === 'string' ? (first['action_id'] as string) : undefined;
+
+    const user = attemptRecord(payload['user']);
+    const inbound: InboundAction = {
+      platform: this.platform,
+      instanceId: this.config?.instanceId ?? this.platform,
+      // Normalised shape the wiring reads: a flat string map under `value`
+      // (mirrors a Feishu button's `action.value`), so the same verifier applies.
+      payload: { value: { ref, ...(commandId ? { action: commandId } : {}) }, raw: payload },
+      actorId: typeof user?.['id'] === 'string' ? (user['id'] as string) : undefined,
+      timestamp: new Date().toISOString(),
+    };
+
+    if (this.actionHandlers.length === 0) {
+      log.warn('Slack action received but no action handler is registered — dropping', {
+        action: commandId,
+      });
+      return;
+    }
+    for (const handler of this.actionHandlers) {
+      try {
+        await handler(inbound);
+      } catch (error) {
+        log.error('Slack action handler failed', { error });
       }
     }
   }

@@ -18,7 +18,13 @@ import {
   type OutboundMessage,
   type OutboundOrigin,
 } from './outbound.js';
-import { resolveNotifyTarget, type NotifyScope, type NotifyTarget, type NotifyTargetLookup } from './notify-route.js';
+import { resolveNotifyTarget, type NotifyResolution, type NotifyScope, type NotifyTarget, type NotifyTargetLookup } from './notify-route.js';
+import {
+  normalizePriority,
+  suppressionReasonFor,
+  type NotifyPreferenceSource,
+  type NotifySuppressionReason,
+} from './notify-prefs.js';
 import { renderOutbound, type OutboundFormat, type RenderCapabilities, type RenderedOutbound } from './render.js';
 
 const log = createLogger('outbound-dispatcher');
@@ -31,9 +37,19 @@ export interface OutboundSink {
   send(target: NotifyTarget, rendered: RenderedOutbound): Promise<string | undefined>;
 }
 
-/** The source port for HITL notifications — structurally `HITLService.onNotification`. */
+/**
+ * The source port the outbound dispatcher consumes — the **channel-level** view
+ * of HITL notifications (structurally `HITLService.onChannelNotification`).
+ *
+ * One logical notification (`HITLService.notify`) must produce exactly one
+ * channel message, regardless of how many humans it fans out to. The dispatcher
+ * therefore subscribes to `onChannelNotification`, **not** to the per-person
+ * `onNotification` stream (which fires once per recipient by design). Subscribing
+ * to the per-person stream is exactly what sent one notification into the same
+ * group N times (req_d25dc9b9); the port no longer even offers that option.
+ */
 export interface NotificationSource {
-  onNotification(handler: (notification: NotificationLike) => void): () => void;
+  onChannelNotification(handler: (notification: NotificationLike) => void): () => void;
 }
 
 /** Minimal structural view of a HITL {@link Notification}. */
@@ -62,13 +78,33 @@ export interface DispatchOutcome {
   messageId?: string;
   /** True when an `info` message was buffered for the digest instead of sent. */
   digested?: boolean;
-  /** Why delivery did not happen (`no-notify-target`, `sink-failed`, …). */
+  /**
+   * True when the walk found **no destination at all** — a distinct state from a
+   * send failure (`sink-failed`). The message is not lost silently: the caller
+   * (and, via wiring, Settings) can see reachability is dead.
+   */
+  undelivered?: boolean;
+  /**
+   * True when the instance's notification preferences suppressed this message —
+   * an **intentional** drop (`notifyOnApproval` / `notifyOnNotification` /
+   * `notifyPriority`), distinct from `undelivered` (no destination at all) and
+   * from a send failure. Toggling a switch is observable here and in one log line.
+   */
+  suppressed?: boolean;
+  /** Why delivery did not happen (`no-notify-target`, `sink-failed`, `notify-off-approval`, …). */
   reason?: string;
 }
 
 export interface OutboundDispatcherOptions {
   lookup: NotifyTargetLookup;
   sink: OutboundSink;
+  /**
+   * The **one** enforcement point's read side: the notification preferences
+   * (`notifyOnApproval` / `notifyOnNotification` / `notifyPriority`) of the
+   * instance a message resolved to. Absent ⇒ no preference filtering (every
+   * message is delivered), so the dispatcher stays usable without Settings.
+   */
+  preferences?: NotifyPreferenceSource;
   /** Org whose targets are resolved. Defaults to `default`. */
   orgId?: string;
   /** Buffer `info` messages and flush them as one summary (default: send immediately). */
@@ -80,6 +116,13 @@ export interface OutboundDispatcherOptions {
    * action refs are opaque signed tokens; when absent the raw approval id is used.
    */
   actionSecret?: string;
+  /**
+   * Resolve an origin agent's display name from its id, so a delivered
+   * notification says *which agent* it came from. Absent ⇒ no attribution line is
+   * added: the message goes out unchanged rather than with a raw id standing in
+   * for a name.
+   */
+  agentName?: (agentId: string) => string | undefined;
 }
 
 /** EventBus task events the dispatcher forwards by default, with their severity. */
@@ -92,19 +135,23 @@ const TASK_EVENT_MAP: Record<string, OutboundMessage['severity']> = {
 export class OutboundDispatcher {
   private readonly lookup: NotifyTargetLookup;
   private readonly sink: OutboundSink;
+  private readonly preferences?: NotifyPreferenceSource;
   private readonly orgId: string;
   private readonly digestInfo: boolean;
   private readonly digestTitle: (count: number) => string;
   private readonly actionSecret?: string;
+  private readonly agentName?: (agentId: string) => string | undefined;
   private infoBuffer: OutboundMessage[] = [];
 
   constructor(opts: OutboundDispatcherOptions) {
     this.lookup = opts.lookup;
     this.sink = opts.sink;
+    this.preferences = opts.preferences;
     this.orgId = opts.orgId ?? 'default';
     this.digestInfo = opts.digestInfo ?? false;
     this.digestTitle = opts.digestTitle ?? ((n) => `📬 通知汇总（${n} 条）`);
     this.actionSecret = opts.actionSecret;
+    this.agentName = opts.agentName;
   }
 
   /**
@@ -113,18 +160,19 @@ export class OutboundDispatcher {
    * outcome so a caller can see it rather than lose it in a rejected promise.
    */
   async dispatch(msg: OutboundMessage): Promise<DispatchOutcome> {
+    const resolution = this.resolve(msg.origin ?? {});
+    if (resolution.status === 'undelivered') return this.reportUndelivered(msg, resolution.reason);
+
+    // ── The one enforcement point for the notification preferences (design §3, R6) ──
+    // consulted immediately before any delivery, reading the *same* instance the
+    // destination came from. An `info` message that never passes here is not even
+    // buffered for the digest.
+    const suppression = suppressionReasonFor(msg, this.preferences?.preferencesFor(resolution.target));
+    if (suppression) return this.reportSuppressed(msg, resolution.matchedScope, resolution.target, suppression);
+
     if (msg.severity === 'info' && this.digestInfo) {
-      const resolved = resolveNotifyTarget(this.orgId, msg.origin ?? {}, this.lookup);
-      if (!resolved) {
-        log.error('Outbound message has no notify target at any level — dropping', {
-          title: msg.title,
-          severity: msg.severity,
-          origin: msg.origin,
-        });
-        return { delivered: false, reason: 'no-notify-target' };
-      }
       this.infoBuffer.push(msg);
-      return { delivered: false, digested: true, scope: resolved.matchedScope };
+      return { delivered: false, digested: true, scope: resolution.matchedScope };
     }
 
     // An urgent message must not jump the queue: flush whatever is buffered first
@@ -133,7 +181,7 @@ export class OutboundDispatcher {
       await this.flushDigest();
     }
 
-    return this.deliverResolved(msg);
+    return this.deliver(resolution.matchedScope, resolution.target, msg);
   }
 
   /** Send the buffered `info` messages as one summary. No-op when nothing is buffered. */
@@ -153,18 +201,61 @@ export class OutboundDispatcher {
     return this.deliverResolved(summary);
   }
 
-  /** Resolve the target and deliver — the digest-free core both entry points share. */
+  /**
+   * Resolve the target and deliver — the digest path's core. It deliberately does
+   * **not** re-apply the preference filter: the digest aggregates `info` items that
+   * already passed the one enforcement point in {@link dispatch}.
+   */
   private async deliverResolved(msg: OutboundMessage): Promise<DispatchOutcome> {
-    const resolved = resolveNotifyTarget(this.orgId, msg.origin ?? {}, this.lookup);
-    if (!resolved) {
-      log.error('Outbound message has no notify target at any level — dropping', {
-        title: msg.title,
-        severity: msg.severity,
-        origin: msg.origin,
-      });
-      return { delivered: false, reason: 'no-notify-target' };
-    }
-    return this.deliver(resolved.matchedScope, resolved.target, msg);
+    const resolution = this.resolve(msg.origin ?? {});
+    if (resolution.status === 'undelivered') return this.reportUndelivered(msg, resolution.reason);
+    return this.deliver(resolution.matchedScope, resolution.target, msg);
+  }
+
+  /**
+   * Record the **intentional** drop — a notification-preference switch turned this
+   * message off (R6). Observable: one outcome and one log line, so flipping a
+   * control has a visible effect instead of changing nothing. Logged at `info`
+   * (this is not an error, unlike a missing destination).
+   */
+  private reportSuppressed(
+    msg: OutboundMessage,
+    scope: NotifyScope,
+    target: NotifyTarget,
+    reason: NotifySuppressionReason,
+  ): DispatchOutcome {
+    log.info('Outbound message suppressed by notification preference', {
+      title: msg.title,
+      severity: msg.severity,
+      priority: msg.priority,
+      platform: target.platform,
+      instanceId: target.instanceId,
+      reason,
+    });
+    return { delivered: false, suppressed: true, scope, target, reason };
+  }
+
+  /**
+   * Read-only resolution — "is this origin deliverable, and where?". Exposed so
+   * Settings can show a reachability state from the *same* walk, without sending.
+   */
+  resolve(origin: OutboundOrigin): NotifyResolution {
+    return resolveNotifyTarget(this.orgId, origin, this.lookup);
+  }
+
+  /**
+   * Record the one thing a delivery must never do silently: no destination.
+   * Exactly one log line and one outcome per message (never per platform — the
+   * walk resolves a single terminus), so the state is loud and countable.
+   */
+  private reportUndelivered(msg: OutboundMessage, reason: string): DispatchOutcome {
+    log.error('Outbound message has no notify target at any level — undelivered', {
+      title: msg.title,
+      severity: msg.severity,
+      origin: msg.origin,
+      reason,
+    });
+    return { delivered: false, undelivered: true, reason };
   }
 
   /** How many `info` messages are waiting in the digest. */
@@ -173,12 +264,13 @@ export class OutboundDispatcher {
   }
 
   /**
-   * Subscribe to a HITL-style notification source. Returns an unsubscribe fn.
-   * Delivery is fire-and-forget: the emitter must never be blocked (or broken) by
-   * a slow platform call.
+   * Subscribe to the **channel-level** notification source. Returns an unsubscribe
+   * fn. One subscription ⇒ one message per logical notification; delivery is
+   * fire-and-forget, so the emitter is never blocked (or broken) by a slow
+   * platform call.
    */
   attachNotifications(source: NotificationSource): () => void {
-    return source.onNotification((n) => {
+    return source.onChannelNotification((n) => {
       void this.dispatch(notificationToOutbound(n, this.actionSecret)).catch((err) => {
         log.error('Failed to dispatch notification', { error: String(err) });
       });
@@ -205,13 +297,33 @@ export class OutboundDispatcher {
     };
   }
 
+  /**
+   * Prefix the message with who sent it, when the origin agent's name is known.
+   *
+   * This is envelope, not payload: `origin.agentId` already travels for routing,
+   * and this surfaces the human-readable name so a notification landing in a
+   * shared group says *which agent* it came from instead of arriving anonymously.
+   * Applied at the single delivery point, so the card, markdown and plain-text
+   * renderings all carry it. Idempotent (never prefixed twice) and skipped
+   * entirely when the name is unknown — a message is never held back for it.
+   */
+  private attribute(msg: OutboundMessage): OutboundMessage {
+    const agentId = msg.origin?.agentId;
+    if (!agentId) return msg;
+    const name = this.agentName?.(agentId);
+    if (!name) return msg;
+    const marker = `**来自**：${name}`;
+    if (msg.body.startsWith(marker)) return msg;
+    return { ...msg, origin: { ...msg.origin, agentName: name }, body: `${marker}\n\n${msg.body}` };
+  }
+
   private async deliver(
     scope: NotifyScope,
     target: NotifyTarget,
     msg: OutboundMessage,
   ): Promise<DispatchOutcome> {
     const caps = this.sink.capabilities(target);
-    const rendered = renderOutbound(msg, caps);
+    const rendered = renderOutbound(this.attribute(msg), caps);
     try {
       const messageId = await this.sink.send(target, rendered);
       const delivered = messageId !== undefined && messageId !== null;
@@ -250,6 +362,7 @@ export function notificationToOutbound(n: NotificationLike, actionSecret?: strin
     title: n.title,
     body: n.body,
     severity: severityOfNotification({ type: n.type, priority: n.priority }),
+    priority: normalizePriority(n.priority),
     origin: Object.keys(origin).length > 0 ? origin : undefined,
   };
 
@@ -301,6 +414,7 @@ export function taskEventToOutbound(
     title,
     body,
     severity,
+    priority: normalizePriority(p['priority']),
     origin: Object.keys(origin).length > 0 ? origin : undefined,
   };
 }

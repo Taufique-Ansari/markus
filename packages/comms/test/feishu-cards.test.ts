@@ -1,5 +1,48 @@
 import { describe, it, expect } from 'vitest';
-import { buildStatusCard, buildTaskCard, buildProgressCard } from '../src/feishu/cards.js';
+import { buildStatusCard, buildTaskCard, buildProgressCard, buildNotificationCard } from '../src/feishu/cards.js';
+
+describe('buildNotificationCard', () => {
+  it('builds a header + markdown body card', () => {
+    const card = buildNotificationCard({ title: '审批请求', body: '请批准部署' });
+    expect(card.header).toMatchObject({ title: { tag: 'plain_text', content: '审批请求' } });
+    const body = (card.elements as any[])[0];
+    expect(body).toMatchObject({ tag: 'div', text: { tag: 'lark_md', content: '请批准部署' } });
+    // No actions → no action row.
+    expect((card.elements as any[]).some((e) => e.tag === 'action')).toBe(false);
+  });
+
+  it('renders action buttons whose value carries the signed ref (never the approval id)', () => {
+    const card = buildNotificationCard({
+      title: '审批请求',
+      body: '请批准部署',
+      actions: [
+        { id: 'approve', label: '批准', style: 'primary', ref: 'signed.ref.1' },
+        { id: 'reject', label: '驳回', style: 'danger', ref: 'signed.ref.2' },
+      ],
+    });
+    const actionEl = (card.elements as any[]).find((e) => e.tag === 'action');
+    expect(actionEl.actions.map((a: any) => a.value)).toEqual([
+      { ref: 'signed.ref.1', action: 'approve' },
+      { ref: 'signed.ref.2', action: 'reject' },
+    ]);
+    expect(actionEl.actions[0].type).toBe('primary');
+    expect(actionEl.actions[1].type).toBe('danger');
+  });
+
+  it('drops actions without a signed ref (an unresolvable button is worse than none)', () => {
+    const card = buildNotificationCard({
+      title: 't',
+      body: 'b',
+      actions: [
+        { id: 'approve', label: '批准', ref: 'signed.ref.1' },
+        { id: 'noop', label: '无', ref: '' },
+      ],
+    });
+    const actionEl = (card.elements as any[]).find((e) => e.tag === 'action');
+    expect(actionEl.actions).toHaveLength(1);
+    expect(actionEl.actions[0].value.ref).toBe('signed.ref.1');
+  });
+});
 
 describe('buildStatusCard', () => {
   it('builds a card with header and content', () => {
