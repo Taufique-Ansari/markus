@@ -2722,7 +2722,7 @@ export class TaskService {
     const byType = updatedByType ?? (updatedBy ? 'agent' : 'system');
 
     // Phase 1: Validate + Mutate
-    const result = this.validateAndApplyTransition(id, status, updatedBy, _internal);
+    const result = this.validateAndApplyTransition(id, status, updatedBy, _internal, byType);
     if (!result) return this.tasks.get(id)!; // no-op (same status)
 
     // Record transition history
@@ -2735,8 +2735,20 @@ export class TaskService {
     return result.task;
   }
 
-  private resolveActorName(actorId?: string, actorType?: string): string | null {
-    if (!actorId) return null;
+  /**
+   * Fallback actor-type resolution for the terminal-revert guard, used only
+   * when the caller did not pass an explicit `updatedByType`. A caller id that
+   * resolves in the agent roster is an agent; anything else (human user id,
+   * unknown) is not — unknown ids fail closed to non-agent (humans/system own
+   * reopen authority; agents always pass explicit 'agent' type).
+   */
+  private resolveActorTypeForGuard(updatedBy?: string): 'human' | 'agent' | 'system' {
+    if (!updatedBy) return 'system';
+    if (this.agentManager?.hasAgent(updatedBy)) return 'agent';
+    return 'human';
+  }
+
+  private resolveActorName(actorId?: string, actorType?: string): string | null {    if (!actorId) return null;
     if (actorType === 'system') return 'System';
     if (actorType === 'agent' && this.agentManager) {
       try {
@@ -2804,6 +2816,7 @@ export class TaskService {
 
   private validateAndApplyTransition(
     id: string, status: TaskStatus, updatedBy?: string, _internal = false,
+    actorType?: 'human' | 'agent' | 'system',
   ): { task: Task; prevStatus: TaskStatus } | null {
     const task = this.tasks.get(id);
     if (!task) throw new Error(`Task not found: ${id}`);
@@ -2821,6 +2834,30 @@ export class TaskService {
       throw new Error(
         `Illegal task state transition: ${prevStatus} → ${status} (task "${task.title}", id: ${id})`,
       );
+    }
+
+    // Terminal-state revert guard (T25 incident, 2026-10-15): a stray
+    // `task_update` from an agent flipped a completed card back to
+    // in_progress 94s after reviewer approval, silently un-blocking... rather,
+    // silently *blocking* its downstream dependents (blockedBy gating reads
+    // status === 'completed'). Structural fix — make the harmful transition
+    // inexpressible instead of relying on reviewers to re-approve:
+    //   • completed → in_progress is only allowed for `human` (owner/reviewer
+    //     explicit reopen) or `system` (dependency engine / scheduler recovery).
+    //   • Agents have no revert authority over a closed card: pre-closure
+    //     rework flows through requestRevision() (review → in_progress, an
+    //     FSM-legal agent path); after closure, re-submission is the only way
+    //     back (assignee task_submit_review → reviewer approve).
+    if (prevStatus === 'completed' && status === 'in_progress') {
+      const resolvedType = actorType ?? this.resolveActorTypeForGuard(updatedBy);
+      if (resolvedType === 'agent') {
+        log.warn('Rejected agent attempt to revert a completed task', { taskId: id, from: prevStatus, to: status, updatedBy });
+        throw new Error(
+          `Terminal state guard: task "${task.title}" (id: ${id}) is completed and cannot be reverted to in_progress by an agent.`
+          + ` Reopening requires a human owner action or a system recovery path.`
+          + ` If the submitted work needs changes, the reviewer should use request_revision while the task is in review.`,
+        );
+      }
     }
 
     // Semantic guards
