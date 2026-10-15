@@ -426,6 +426,52 @@ describe('TaskService', () => {
         .toThrow(/Illegal task state transition/);
     });
 
+    // 【平台闸门】游离 task_update 曾把已 completed 卡回退 in_progress（T25 实证，
+    // changedBy=agent、无返工动作），静默阻断下游 blockedBy 依赖链。
+    // 纪律：completed 卡的重开只能来自 human（owner/审阅返工）或 system（依赖引擎/调度）；
+    // agent 一律拒绝 —— 返工走 requestRevision（review 状态），关单后 agent 无回退权。
+    describe('completed terminal guard (agent cannot revert)', () => {
+      it('rejects agent reverting completed → in_progress', async () => {
+        const task = await createTaskInReview(ts);
+        const accepted = ts.acceptTask(task.id, REVIEWER);
+        expect(accepted.status).toBe('completed');
+        expect(() =>
+          ts.updateTaskStatus(task.id, 'in_progress', AGENT_A, false, false, 'agent', 'stray call'),
+        ).toThrow(/Terminal.*completed.*agent/i);
+      });
+
+      it('rejects agent revert even when actor type is omitted but updatedBy resolves to an agent', () => {
+        const task = ts.createTask(createDefaults({ creatorRole: 'human' }) as never);
+        ts.approveTask(task.id, 'user-1');
+        // 直接从 in_progress 之外构造：先合法 completed
+        const accepted = (() => {
+          // simulate review → completed by reviewer (human type path not needed here)
+          ts.updateTaskStatus(task.id, 'review', REVIEWER, false, false, 'agent', 'Submitted for review');
+          return ts.updateTaskStatus(task.id, 'completed', REVIEWER, false, false, 'human', 'Review approved');
+        })();
+        expect(accepted.status).toBe('completed');
+        // byType 缺省时：updatedBy 命中 agentManager 名册 ⇒ 视为 agent，拒绝
+        expect(() => ts.updateTaskStatus(task.id, 'in_progress', AGENT_A))
+          .toThrow(/Terminal.*completed.*agent/i);
+      });
+
+      it('allows human reopening completed → in_progress (reviewer revision path)', () => {
+        const task = ts.createTask(createDefaults({ creatorRole: 'human' }) as never);
+        ts.approveTask(task.id, 'user-1');
+        ts.updateTaskStatus(task.id, 'review', REVIEWER, false, false, 'agent', 'Submitted for review');
+        const reopened = ts.updateTaskStatus(task.id, 'in_progress', 'user-1', false, false, 'human', 'Owner reopen');
+        expect(reopened.status).toBe('in_progress');
+      });
+
+      it('allows system reopening completed → in_progress (dependency engine / scheduler)', () => {
+        const task = ts.createTask(createDefaults({ creatorRole: 'human' }) as never);
+        ts.approveTask(task.id, 'user-1');
+        ts.updateTaskStatus(task.id, 'review', REVIEWER, false, false, 'agent', 'Submitted for review');
+        const reopened = ts.updateTaskStatus(task.id, 'in_progress', undefined, false, false, 'system', 'auto');
+        expect(reopened.status).toBe('in_progress');
+      });
+    });
+
     it('records status history when repo configured', () => {
       const statusTransitionRepo = {
         record: vi.fn(),
