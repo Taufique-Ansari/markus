@@ -14,6 +14,17 @@ import type {
   InstanceListResponse,
   InstanceStatus,
 } from './lib/instanceIntegrations.ts';
+import {
+  adaptRemoteStatus,
+  REMOTE_LOCAL_ROUTES,
+  type AgentTunnelTaskContract,
+  type Platform,
+  type RemoteEndpointKind,
+  type RemoteSetupTargets,
+  type RemoteStatusV2,
+} from './lib/remoteAccess.ts';
+
+export type { RemoteStatusV2 } from './lib/remoteAccess.ts';
 
 export interface SubagentProgressEvent {
   eventType: 'started' | 'tool_start' | 'tool_end' | 'thinking' | 'iteration' | 'completed' | 'error';
@@ -1960,6 +1971,47 @@ export const api = {
     getRemote: () => request<RemoteStatus>('/settings/remote'),
     enableRemote: () => request<{ ok: boolean; status: RemoteStatus }>('/settings/remote/enable', { method: 'POST' }),
     disableRemote: () => request<{ ok: boolean }>('/settings/remote/disable', { method: 'POST' }),
+    // ── Tunnel-based remote access (T9) ──────────────────────────────────────
+    // getRemoteV2 adapts whatever `/settings/remote` returns: a V2 payload passes
+    // through, the legacy relay payload is mapped (see lib/remoteAccess.ts). This
+    // lets the new wizard ship before T8 flips the server to V2.
+    getRemoteV2: async (): Promise<RemoteStatusV2 | null> =>
+      adaptRemoteStatus(await request<unknown>(REMOTE_LOCAL_ROUTES.status)),
+    /** Detect which tunnel binaries are installed on this machine (cloudflared / tailscale). */
+    remoteDetect: () =>
+      request<{ cloudflared: boolean; tailscale: boolean }>(REMOTE_LOCAL_ROUTES.detect),
+    remoteTunnelRestart: () =>
+      request<{ ok: boolean; status?: unknown }>(REMOTE_LOCAL_ROUTES.tunnelRestart, { method: 'POST' }),
+    /** Re-register / rotate the public address (quick tunnels get a new hostname on restart). */
+    remoteTunnelRotate: () =>
+      request<{ ok: boolean; publicUrl?: string }>(REMOTE_LOCAL_ROUTES.tunnelRotate, { method: 'POST' }),
+    remoteTunnelStop: () =>
+      request<{ ok: boolean }>(REMOTE_LOCAL_ROUTES.tunnelStop, { method: 'POST' }),
+    /** Register / replace the public address (manual re-entry after a failed verify). */
+    remoteTunnelRegister: (data: { kind: RemoteEndpointKind; publicUrl: string }) =>
+      request<{ ok: boolean; publicUrl?: string }>(REMOTE_LOCAL_ROUTES.tunnelRegister, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      }),
+    /** Path B — build the Agent handoff for the remote-access setup.
+     *  Previews only: the contract + prompt are built server-side (one source for
+     *  what will run) and returned; the caller prefills `prompt` into the chosen
+     *  Agent's Team-Chat composer. It does NOT send anything to the Agent.
+     *  `agentId` is optional (the server recommends one). */
+    remoteAgentSetup: (data: {
+      kind: RemoteEndpointKind;
+      platform?: Platform;
+      agentId?: string;
+      username?: string;
+      instanceName?: string;
+    }) =>
+      request<{ ok: boolean; agentId?: string; contract?: AgentTunnelTaskContract; prompt?: string; error?: string }>(
+        REMOTE_LOCAL_ROUTES.agentSetup,
+        { method: 'POST', body: JSON.stringify(data) },
+      ),
+    /** Path B — candidate recipient Agents for the picker. */
+    remoteSetupTargets: () =>
+      request<RemoteSetupTargets>(REMOTE_LOCAL_ROUTES.agentSetupTargets),
     // Feishu *extensions* that have no generic equivalent (issue #340). The
     // generic credential read/write lives on the manifest endpoints below;
     // these three are the extras the generic form cannot express.

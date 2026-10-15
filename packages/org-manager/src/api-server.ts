@@ -4,7 +4,7 @@ import { readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync, rmSync
 import { gzipSync } from 'node:zlib';
 import { homedir } from 'node:os';
 import { execSync } from 'node:child_process';
-import { createLogger, generateId, userId as genUserId, resolveJwtSecret, resolveInitialAdminPassword, initialAdminPasswordFile, clearInitialAdminPassword, kebab, saveConfig, loadConfig, setEnvValue, unsetEnvValue, persistProviderSecret as storeProviderSecret, markusHome, getTextContent, stripInternalBlocks, extractThinkBlocks, APP_VERSION, checkForUpdate, buildManifest, manifestFilename, CHANNEL_CONTEXT_MESSAGES, SESSION_RESTORE_MAX_MESSAGES, PROVIDERS, getProviderBootstrapModel, pickOrgSecretary, type TaskStatus, type TaskPriority, type TaskSortField, type SortOrder, type PackageType, type RequirementStatus, type IntegrationConfig, type UserInputAnswer, type AgentActivity } from '@markus/shared';
+import { createLogger, generateId, userId as genUserId, resolveJwtSecret, resolveInitialAdminPassword, initialAdminPasswordFile, clearInitialAdminPassword, kebab, saveConfig, loadConfig, setEnvValue, unsetEnvValue, persistProviderSecret as storeProviderSecret, markusHome, getTextContent, stripInternalBlocks, extractThinkBlocks, APP_VERSION, checkForUpdate, buildManifest, manifestFilename, CHANNEL_CONTEXT_MESSAGES, SESSION_RESTORE_MAX_MESSAGES, PROVIDERS, REMOTE_TUNNEL_MODES, getProviderBootstrapModel, pickOrgSecretary, type TaskStatus, type TaskPriority, type TaskSortField, type SortOrder, type PackageType, type RequirementStatus, type IntegrationConfig, type UserInputAnswer, type AgentActivity } from '@markus/shared';
 import {
   GatewayError,
   WorkflowEngine,
@@ -245,6 +245,67 @@ export function buildNonStreamingSegments(params: {
   return segments.length > 0 ? segments : undefined;
 }
 
+/**
+ * Minimal structural view of a remote-access controller (T8).
+ *
+ * `@markus/remote`'s `RemoteController` satisfies it, as does the legacy relay
+ * agent (via the optional members). Kept structural on purpose so the API server
+ * can drive either path WITHOUT taking a dependency on `@markus/remote`
+ * (which would create a package cycle).
+ */
+export interface RemoteControllerLike {
+  /** V2 + legacy-compat payload for `remote:status` (T8). */
+  getRemoteStatus(): unknown;
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  /** Only tunnel controllers implement these (the legacy relay rebuilds itself). */
+  restart?(): Promise<void>;
+  rotate?(): Promise<void>;
+  /** Adopt an externally-started address (path A re-entry / path B); tunnels only. */
+  adopt?(publicUrl: string): Promise<void>;
+  onStatus(cb: (payload: unknown) => void): () => void;
+  /** Local verify route wiring (T7); absent on the legacy relay. */
+  getVerifyToken?(): string | null;
+  getVerifyPath?(): string;
+  /** Endpoint id pointer for `config.remote.activeEndpointId`. */
+  getActiveEndpointId?(): string | null;
+  /** Back-compat with the pre-T8 relay agent. */
+  getStatus?(): unknown;
+}
+
+/**
+ * Path-B planner injected by the CLI (T10). Kept structural for the same reason
+ * as {@link RemoteControllerLike}: the API server must not import
+ * `@markus/remote`. The CLI passes an adapter over `buildAgentSetupPlan`.
+ */
+export interface RemoteSetupPlannerLike {
+  plan(input: {
+    kind: string;
+    platform: string;
+    localPort?: number;
+    instanceName?: string;
+    username?: string;
+    hubUrl?: string;
+  }): { contract: unknown; prompt: string };
+}
+
+/** Neutral payload when no controller is wired yet (mirrors `RemoteStatusV2`). */
+const EMPTY_REMOTE_STATUS = {
+  enabled: false,
+  mode: 'cloudflare_quick',
+  state: 'idle',
+  entryUrl: null as string | null,
+  publicUrl: null as string | null,
+  health: 'unknown',
+  // legacy compat aliases (old UI builds read these)
+  connected: false,
+  remoteUrl: null as string | null,
+  signalUrl: null as string | null,
+  instanceId: null as string | null,
+  peerCount: 0,
+  peers: [] as unknown[],
+};
+
 export class APIServer {
   static readonly ROUTING_CACHE_TTL_MS = 5 * 60 * 1000;
   /** Per-provider live key/model validation budget when a routing-candidates
@@ -280,8 +341,16 @@ export class APIServer {
   private workflowRunner?: WorkflowRunner;
   private teamTemplateRegistry: TeamTemplateRegistry;
   private fileStorage?: LocalFileStorageProvider;
-  private remoteAgent?: { getStatus(): unknown; start(): Promise<void>; stop(): Promise<void>; onStatus(cb: (s: unknown) => void): () => void };
-  private remoteAgentFactory?: () => Promise<{ getStatus(): unknown; start(): Promise<void>; stop(): Promise<void>; onStatus(cb: (s: unknown) => void): () => void } | null>;
+  private remoteAgent?: RemoteControllerLike;
+  private remoteAgentFactory?: () => Promise<RemoteControllerLike | null>;
+  /** Injected local tunnel verify route (T7) — matched before the static table. */
+  private remoteVerifyHandler?: (req: IncomingMessage, res: ServerResponse) => boolean;
+  /** Path-B planner (T10), injected from the CLI to keep @markus/remote out of org-manager. */
+  private remoteSetupPlanner?: RemoteSetupPlannerLike;
+  /** Binary probe for the wizard's detection badges; injected from the CLI. */
+  private remoteDetectHandler?: () => Promise<{ cloudflared: boolean; tailscale: boolean }>;
+  /** Local Markus API port a tunnel must target (needed by the Path-B contract). */
+  private remoteLocalPort = 8056;
   public modelCatalog?: ModelCatalogService;
   public routingCandidatesCache: { data: unknown; expireAt: number } | null = null;
   /** In-flight chat streams for refresh reattach. */
@@ -1574,15 +1643,210 @@ export class APIServer {
     }
   }
 
-  setRemoteAgent(agent: { getStatus(): unknown; start(): Promise<void>; stop(): Promise<void>; onStatus(cb: (s: unknown) => void): () => void }): void {
+  /**
+   * Wire the remote-access controller (tunnel or legacy relay) and forward its
+   * status changes onto the `remote:status` WebSocket event. We RE-READ the
+   * payload on every event (rather than trusting the callback argument) so the
+   * wire shape is built in exactly one place.
+   */
+  setRemoteAgent(agent: RemoteControllerLike): void {
     this.remoteAgent = agent;
-    agent.onStatus((status) => {
-      this.ws.broadcast({ type: 'remote:status', payload: status, timestamp: new Date().toISOString() });
+    agent.onStatus(() => this.broadcastRemoteStatus());
+  }
+
+  setRemoteAgentFactory(factory: () => Promise<RemoteControllerLike | null>): void {
+    this.remoteAgentFactory = factory;
+  }
+
+  /**
+   * Lazily wire the remote controller.
+   *
+   * Boot wires it only when `config.remote.enabled` was ALREADY true at startup.
+   * A config change made while the app is running (or a first-time enable from the
+   * Settings wizard) would otherwise leave every tunnel route dead-ending at 400
+   * ("Remote access is not running") with no way to recover short of a restart.
+   *
+   * Creating the controller is side-effect-free — it does NOT spawn a tunnel
+   * (only `start()` does) — so on-demand creation is safe.
+   *
+   * Returns the controller, or null when no factory is wired / the user is not
+   * signed in to the Hub yet.
+   */
+  private async ensureRemoteAgent(): Promise<RemoteControllerLike | null> {
+    if (!this.remoteAgent && this.remoteAgentFactory) {
+      const agent = await this.remoteAgentFactory().catch(() => null);
+      if (agent) this.setRemoteAgent(agent);
+    }
+    return this.remoteAgent ?? null;
+  }
+
+  /**
+   * Register the local tunnel verify route (`GET /api/remote/verify`, T7).
+   * Returns true when it handled the request. Invoked BEFORE route dispatch so
+   * the token echo is reachable through the user's tunnel (and locally) without
+   * auth; its path is dynamic, so it is matched by this handler, not the table.
+   */
+  setRemoteVerifyHandler(handler: (req: IncomingMessage, res: ServerResponse) => boolean): void {
+    this.remoteVerifyHandler = handler;
+  }
+
+  /** Wire the Path-B plan builder (T10). Absent ⇒ the agent-setup route returns 501. */
+  setRemoteSetupPlanner(planner: RemoteSetupPlannerLike, localPort?: number): void {
+    this.remoteSetupPlanner = planner;
+    if (typeof localPort === 'number' && localPort > 0) this.remoteLocalPort = localPort;
+  }
+
+  /** Wire the tunnel-binary probe used by `GET /api/settings/remote/detect`. */
+  setRemoteDetectHandler(handler: () => Promise<{ cloudflared: boolean; tailscale: boolean }>): void {
+    this.remoteDetectHandler = handler;
+  }
+
+  /** Broadcast the current remote status (`RemoteStatusV2` + legacy aliases). */
+  broadcastRemoteStatus(): void {
+    this.ws.broadcast({
+      type: 'remote:status',
+      payload: this.remoteStatusPayload(),
+      timestamp: new Date().toISOString(),
     });
   }
 
-  setRemoteAgentFactory(factory: () => Promise<{ getStatus(): unknown; start(): Promise<void>; stop(): Promise<void>; onStatus(cb: (s: unknown) => void): () => void } | null>): void {
-    this.remoteAgentFactory = factory;
+  /**
+   * The single place the `remote:status` payload is built. Prefers the wired
+   * controller; when none is wired it reports the persisted INTENT from
+   * `config.remote` so the UI can show “configured but offline”, not a bare 400.
+   */
+  private remoteStatusPayload(): unknown {
+    const a = this.remoteAgent;
+    if (a) {
+      if (typeof a.getRemoteStatus === 'function') return a.getRemoteStatus();
+      if (typeof a.getStatus === 'function') return a.getStatus();
+    }
+    const remote = this.readRemoteIntent();
+    return {
+      ...EMPTY_REMOTE_STATUS,
+      enabled: remote.enabled === true,
+      mode: typeof remote.mode === 'string' ? remote.mode : EMPTY_REMOTE_STATUS.mode,
+    };
+  }
+
+  /** Read the persisted `config.remote` intent block (never throws). */
+  private readRemoteIntent(): { enabled?: boolean; mode?: string } {
+    try {
+      return loadConfig(this.markusConfigPath).remote ?? {};
+    } catch {
+      return {};
+    }
+  }
+
+  /** Extract the persistable `config.remote` INTENT from an enable request body. */
+  private remoteIntentFrom(body: unknown): { enabled: true; mode?: string } {
+    const out: { enabled: true; mode?: string } = { enabled: true };
+    const mode = body && typeof body === 'object' ? (body as Record<string, unknown>).mode : undefined;
+    if (typeof mode === 'string' && (REMOTE_TUNNEL_MODES as readonly string[]).includes(mode)) {
+      out.mode = mode;
+    }
+    return out;
+  }
+
+  /** Persist the `config.remote` intent (never runtime state) for a chosen mode. */
+  private persistRemoteIntent(mode: unknown): void {
+    if (typeof mode !== 'string' || !(REMOTE_TUNNEL_MODES as readonly string[]).includes(mode)) return;
+    try {
+      saveConfig({ remote: { enabled: true, mode } } as unknown as Partial<ReturnType<typeof loadConfig>>, this.markusConfigPath);
+    } catch (err) {
+      log.warn('persistRemoteIntent failed', { error: String(err) });
+    }
+  }
+
+  /** Candidate recipient Agents for the Path-B picker, plus a sensible default. */
+  private remoteSetupTargets(): {
+    agents: Array<{ id: string; name: string; role: string }>;
+    recommendedId: string | null;
+  } {
+    let agents: Array<{ id: string; name: string; role: string }> = [];
+    try {
+      agents = this.orgService
+        .getAgentManager()
+        .listAgents()
+        .map((a) => {
+          const r = a as unknown as Record<string, unknown>;
+          return {
+            id: String(r.id ?? ''),
+            name: String(r.name ?? r.id ?? ''),
+            role: String(r.role ?? ''),
+          };
+        })
+        .filter((a) => a.id);
+    } catch (err) {
+      log.warn('remoteSetupTargets: listAgents failed', { error: String(err) });
+    }
+    let secretaryId: string | null = null;
+    try {
+      secretaryId = this.orgService.findOrgSecretary?.()?.id ?? null;
+    } catch {
+      secretaryId = null;
+    }
+    const prefer = /secretary|秘书|ops|运维|devops/i;
+    const recommendedId =
+      (secretaryId && agents.some((a) => a.id === secretaryId) ? secretaryId : null) ??
+      agents.find((a) => prefer.test(`${a.name} ${a.role}`))?.id ??
+      agents[0]?.id ??
+      null;
+    return { agents, recommendedId };
+  }
+
+  /**
+   * Path B — build the frozen task contract, dispatch it to the chosen Agent
+   * and return the contract so the wizard can render exactly what will run.
+   */
+  private async handleRemoteAgentSetup(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.remoteSetupPlanner) {
+      this.json(res, 501, { error: 'Agent-assisted setup is not wired on this build.' });
+      return;
+    }
+    const raw = await this.readBody(req).catch(() => undefined);
+    const b = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+    const kind = typeof b.kind === 'string' ? b.kind : '';
+    if (!(REMOTE_TUNNEL_MODES as readonly string[]).includes(kind)) {
+      this.json(res, 400, { error: `Unsupported tunnel kind: ${kind || '(missing)'}` });
+      return;
+    }
+    const platforms = ['macos', 'linux', 'windows'] as const;
+    const platform =
+      typeof b.platform === 'string' && (platforms as readonly string[]).includes(b.platform)
+        ? b.platform
+        : process.platform === 'darwin'
+          ? 'macos'
+          : process.platform === 'win32'
+            ? 'windows'
+            : 'linux';
+
+    const { agents, recommendedId } = this.remoteSetupTargets();
+    const requested = typeof b.agentId === 'string' && b.agentId ? b.agentId : undefined;
+    if (requested && !agents.some((a) => a.id === requested)) {
+      this.json(res, 400, { error: `Unknown Agent: ${requested}` });
+      return;
+    }
+    const agentId = requested ?? recommendedId;
+    if (!agentId) {
+      this.json(res, 400, { error: 'No Agent is available to run the setup. Pick one in the wizard.' });
+      return;
+    }
+
+    const { contract, prompt } = this.remoteSetupPlanner.plan({
+      kind,
+      platform,
+      localPort: this.remoteLocalPort,
+      ...(typeof b.instanceName === 'string' ? { instanceName: b.instanceName } : {}),
+      ...(typeof b.username === 'string' && b.username ? { username: b.username } : {}),
+    });
+
+    // Preview only — we deliberately do NOT `sendMessage` here. The wizard
+    // prefills `prompt` into the chosen Agent's Team-Chat composer and the user
+    // decides whether to send it, so they watch the whole run instead of it
+    // being a black box. Nothing is persisted either: the user has not
+    // committed to anything by merely opening a draft.
+    this.json(res, 200, { ok: true, agentId, contract, prompt });
   }
 
   setGateway(gateway: ExternalAgentGateway, secret?: string): void {
@@ -2768,6 +3032,17 @@ export class APIServer {
 
     const url = new URL(req.url ?? '/', `http://localhost:${this.port}`);
     const path = url.pathname;
+
+    // Tunnel ownership probe (T7): a tiny token echo reachable through the user's
+    // tunnel. Its path is dynamic (it changes on re-register), so it is matched
+    // by the injected handler rather than the static route table.
+    if (this.remoteVerifyHandler) {
+      try {
+        if (this.remoteVerifyHandler(req, res)) return;
+      } catch (err) {
+        log.warn('remote verify handler threw', { error: String(err) });
+      }
+    }
 
     this.route(req, res, path, url).catch(error => {
       const msg = error instanceof Error ? error.message : String(error);
@@ -7817,25 +8092,23 @@ EXPLANATION_END`;
       return;
     }
 
-    // Settings — Remote Access
+    // Settings — Remote Access (T8: V2 payload + legacy aliases)
     if (path === '/api/settings/remote' && req.method === 'GET') {
-      const status = this.remoteAgent?.getStatus() ?? { enabled: false, connected: false, instanceId: null, remoteUrl: null, signalUrl: null, peerCount: 0 };
-      this.json(res, 200, status);
+      this.json(res, 200, this.remoteStatusPayload());
       return;
     }
 
     if (path === '/api/settings/remote/enable' && req.method === 'POST') {
-      if (!this.remoteAgent && this.remoteAgentFactory) {
-        const agent = await this.remoteAgentFactory();
-        if (agent) this.setRemoteAgent(agent);
-      }
-      if (!this.remoteAgent) {
+      const agent = await this.ensureRemoteAgent();
+      if (!agent) {
         this.json(res, 400, { error: 'Remote access not configured. Please sign in to Markus Hub first.' });
         return;
       }
-      this.remoteAgent.start().catch(() => {});
-      try { saveConfig({ remote: { enabled: true } } as any, this.markusConfigPath); } catch { /* non-critical */ }
-      this.json(res, 200, { ok: true, status: this.remoteAgent.getStatus() });
+      // Persist the INTENT (single source of truth); never a second copy of state.
+      const body = await this.readBody(req).catch(() => undefined);
+      try { saveConfig({ remote: this.remoteIntentFrom(body) } as any, this.markusConfigPath); } catch { /* non-critical */ }
+      agent.start().catch(() => {});
+      this.json(res, 200, { ok: true, status: this.remoteStatusPayload() });
       return;
     }
 
@@ -7844,7 +8117,106 @@ EXPLANATION_END`;
         await this.remoteAgent.stop();
       }
       try { saveConfig({ remote: { enabled: false } } as any, this.markusConfigPath); } catch { /* non-critical */ }
-      this.json(res, 200, { ok: true });
+      this.json(res, 200, { ok: true, status: this.remoteStatusPayload() });
+      return;
+    }
+
+    // Binary detection for the wizard's ✓ badges (T9 `REMOTE_LOCAL_ROUTES.detect`).
+    if (path === '/api/settings/remote/detect' && req.method === 'GET') {
+      if (!this.remoteDetectHandler) {
+        this.json(res, 501, { error: 'Tunnel detection is not wired on this build.' });
+        return;
+      }
+      try {
+        this.json(res, 200, await this.remoteDetectHandler());
+      } catch {
+        this.json(res, 200, { cloudflared: false, tailscale: false });
+      }
+      return;
+    }
+
+    // Tunnel lifecycle. The paths below are EXACTLY the ones the web-ui wizard
+    // declares in `REMOTE_LOCAL_ROUTES` (T9); T10 aligned the server onto that
+    // single declaration — before that, T8 had shipped `/restart` `/rotate`
+    // without the `tunnel/` prefix, so the wizard's buttons 404'd.
+    if (path === '/api/settings/remote/tunnel/restart' && req.method === 'POST') {
+      const agent = await this.ensureRemoteAgent();
+      if (!agent?.restart) {
+        this.json(res, 400, { error: 'Remote access is not running.' });
+        return;
+      }
+      try {
+        await agent.restart();
+        this.json(res, 200, { ok: true, status: this.remoteStatusPayload() });
+      } catch (err) {
+        this.json(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    if (path === '/api/settings/remote/tunnel/rotate' && req.method === 'POST') {
+      const agent = await this.ensureRemoteAgent();
+      if (!agent?.rotate) {
+        this.json(res, 400, { error: 'Remote access is not running.' });
+        return;
+      }
+      try {
+        await agent.rotate();
+        this.json(res, 200, { ok: true, status: this.remoteStatusPayload() });
+      } catch (err) {
+        this.json(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    if (path === '/api/settings/remote/tunnel/stop' && req.method === 'POST') {
+      try {
+        await (await this.ensureRemoteAgent())?.stop();
+        this.json(res, 200, { ok: true, status: this.remoteStatusPayload() });
+      } catch (err) {
+        this.json(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // Adopt an address for a tunnel the user (path A re-entry) or an Agent
+    // (path B) already started: register it with the Hub, spawning nothing.
+    if (path === '/api/settings/remote/tunnel/register' && req.method === 'POST') {
+      // Lazy-wire: the wizard's manual re-entry must work even when the user has
+      // not run /enable yet this session (that was the 2026-10-14 failure: the
+      // controller was never wired, so this route 400'd and "我已运行" did nothing).
+      const agent = await this.ensureRemoteAgent();
+      if (!agent?.adopt) {
+        this.json(res, 400, {
+          error: 'Remote access is not configured. Sign in to the Markus Hub, then try again.',
+        });
+        return;
+      }
+      const body = await this.readBody(req).catch(() => undefined);
+      const rec = body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+      const publicUrl = rec.publicUrl;
+      if (typeof publicUrl !== 'string' || !publicUrl.trim()) {
+        this.json(res, 400, { error: 'publicUrl is required.' });
+        return;
+      }
+      this.persistRemoteIntent(rec.kind);
+      try {
+        await agent.adopt(publicUrl.trim());
+        this.json(res, 200, { ok: true, status: this.remoteStatusPayload() });
+      } catch (err) {
+        this.json(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // ── Path B (T10): hand the install/config to an Agent ────────────────────
+    if (path === '/api/settings/remote/agent-setup/targets' && req.method === 'GET') {
+      this.json(res, 200, this.remoteSetupTargets());
+      return;
+    }
+
+    if (path === '/api/settings/remote/agent-setup' && req.method === 'POST') {
+      await this.handleRemoteAgentSetup(req, res);
       return;
     }
 

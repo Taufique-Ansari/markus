@@ -1825,41 +1825,134 @@ async function startServerCore(
   apiServer.setGateway(gateway, gatewaySecret);
   log.info('External Agent Gateway enabled', { secret: process.env['GATEWAY_SECRET'] ? '(custom)' : '(auto-generated)' });
 
-  // ── Remote Access (WebRTC P2P via markus-hub + signal server) ─────────
+  // ── Remote Access (T8) ─────────────────────────────────────────────────
+  // Prefer the user's OWN tunnel (cloudflared / tailscale) — the data plane
+  // never touches our servers. `config.remote.mode` selects the channel; when it
+  // is unset (or `legacyRelay` is explicitly on) we fall back to the legacy
+  // WebRTC relay so existing installs keep working during the grey release.
   {
-    const hubTokenPath = join(homedir(), '.markus', 'hub-token');
+    const markusConfigPath = (values['config'] as string | undefined) ?? getDefaultConfigPath();
+    const remoteCfg = config.remote ?? {};
+    const useLegacyRelay = remoteCfg.legacyRelay === true || !remoteCfg.mode;
+    const hubBaseUrl = remoteCfg.hubUrl ?? config.hub?.url ?? 'https://www.markus.global';
+    const instanceName = remoteCfg.instanceName ?? config.org?.name ?? 'My Markus';
+    const localPort = remoteCfg.localPort ?? config.server?.apiPort ?? 8056;
 
-    const createRemoteAgent = async () => {
+    // Legacy relay: keep the old WebRTC agent, wrapped so it speaks the same
+    // controller interface as the tunnel path.
+    const createLegacyRemote = async () => {
+      const hubTokenPath = join(homedir(), '.markus', 'hub-token');
       const token = existsSync(hubTokenPath) ? readFileSync(hubTokenPath, 'utf-8').trim() : undefined;
       if (!token) return null;
-      const { RemoteAccessAgent } = await import('@markus/remote');
-      return new RemoteAccessAgent({
-        hubUrl: config.remote?.hubUrl ?? config.hub?.url ?? 'https://www.markus.global',
+      const { RemoteAccessAgent, createLegacyController: wrap } = await import('@markus/remote');
+      return wrap(new RemoteAccessAgent({
+        hubUrl: hubBaseUrl,
         hubToken: token,
-        instanceName: config.remote?.instanceName ?? config.org?.name ?? 'My Markus',
-        localPort: config.server?.apiPort ?? 8056,
+        instanceName,
+        localPort,
         jwtSecret: resolveJwtSecret(),
-      });
+      }));
     };
 
-    apiServer.setRemoteAgentFactory(createRemoteAgent);
+    // Tunnel path: TunnelManager (T6) + RegistryClient (T7) behind one controller.
+    // autoInstallConsent is deliberately NOT set — a missing binary refuses to
+    // install and exposes the plan instead (the wizard/Agent path handles consent).
+    const createTunnelRemote = async () => {
+      const {
+        TunnelManager,
+        RegistryClient,
+        createTunnelController: wrap,
+        persistEndpointSecretForTunnel,
+        createLocalVerifyHandler,
+        resolveHubToken,
+        hubUsernameFromToken,
+        buildEntryUrl,
+      } = await import('@markus/remote');
+      const hubToken = resolveHubToken();
+      if (!hubToken) return null; // not signed in to the Hub — can enable later via Settings
+      const registry = new RegistryClient({ hubUrl: hubBaseUrl, hubToken });
+      // The stable shareable entry (`https://{hubUser}.remote.markus.global`),
+      // derived from the signed-in Hub identity. Without this the status payload
+      // reported `entryUrl: null` and the Settings panel had nothing to show.
+      const entryUrl = buildEntryUrl(hubUsernameFromToken(hubToken));
+      const manager = new TunnelManager(
+        {
+          kind: remoteCfg.mode!,
+          apiPort: localPort,
+          instanceName,
+          ...(remoteCfg.hostname ? { hostname: remoteCfg.hostname } : {}),
+          ...(entryUrl ? { entryUrl } : {}),
+        },
+        { registry, persistSecret: persistEndpointSecretForTunnel },
+      );
+      // Local verify route (T7): read THROUGH the manager — no second cache.
+      apiServer.setRemoteVerifyHandler(createLocalVerifyHandler(() => manager.getVerifyToken()));
+      const controller = wrap(manager);
+      // Persist the endpoint-id POINTER only when it actually changes.
+      let lastEndpointId = remoteCfg.activeEndpointId ?? null;
+      controller.onStatus(() => {
+        const id = controller.getActiveEndpointId();
+        if (id && id !== lastEndpointId) {
+          lastEndpointId = id;
+          try {
+            saveConfig({ remote: { activeEndpointId: id } } as never, markusConfigPath);
+          } catch { /* non-critical */ }
+        }
+      });
+      return controller;
+    };
 
-    if (config.remote?.enabled === true) {
-      const remoteAgent = await createRemoteAgent();
-      if (remoteAgent) {
-        apiServer.setRemoteAgent(remoteAgent);
-        if (config.remote?.autoConnect !== false) {
-          remoteAgent.start().then(() => {
-            const status = remoteAgent.getStatus();
-            if (status.remoteUrl) {
-              log.info(`Remote access available at ${status.remoteUrl}`);
+    const remoteFactory = useLegacyRelay ? createLegacyRemote : createTunnelRemote;
+    apiServer.setRemoteAgentFactory(remoteFactory);
+
+    // ── Path B wiring (T10) ───────────────────────────────────────────────
+    // The plan the wizard shows the user is built HERE, from the same provider
+    // knowledge the TunnelManager uses; the browser only renders it. Nothing
+    // installs without the user pressing "hand it to the Agent".
+    {
+      const { execFile } = await import('node:child_process');
+      const probe = (bin: string) =>
+        new Promise<boolean>((resolve) => {
+          execFile(process.platform === 'win32' ? 'where' : 'which', [bin], (err) => resolve(!err));
+        });
+      apiServer.setRemoteDetectHandler(async () => ({
+        cloudflared: await probe('cloudflared'),
+        tailscale: await probe('tailscale'),
+      }));
+
+      const { buildAgentSetupPlan } = await import('@markus/remote');
+      apiServer.setRemoteSetupPlanner(
+        {
+          plan: (input) =>
+            buildAgentSetupPlan({
+              kind: input.kind as never,
+              platform: input.platform as never,
+              localPort: input.localPort ?? localPort,
+              hubUrl: input.hubUrl ?? hubBaseUrl,
+              ...(input.instanceName ? { instanceName: input.instanceName } : {}),
+              ...(input.username ? { username: input.username } : {}),
+            }),
+        },
+        localPort,
+      );
+    }
+
+    if (remoteCfg.enabled === true) {
+      const controller = await remoteFactory();
+      if (controller) {
+        apiServer.setRemoteAgent(controller);
+        if (remoteCfg.autoConnect !== false) {
+          controller.start().then(() => {
+            const status = controller.getRemoteStatus() as { publicUrl?: string | null };
+            if (status?.publicUrl) {
+              log.info(`Remote access available at ${status.publicUrl}`);
             }
           }).catch((err: unknown) => {
             log.warn('Remote access failed to start', { error: String(err) });
           });
         }
       } else {
-        log.debug('Remote access: no Hub token yet (can enable later via Settings)');
+        log.debug('Remote access: not signed in to the Hub yet (can enable later via Settings)');
       }
     }
   }

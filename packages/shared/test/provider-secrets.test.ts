@@ -52,4 +52,28 @@ describe('provider-secrets', () => {
     expect(raw.match(/OPENAI_API_KEY=/g)?.length).toBe(1);
     expect(raw).toContain('OPENAI_API_KEY=second');
   });
+
+  // ── Generic (non-provider) secrets — remote-access hub token / rotate secret ──
+  it('persistNamedSecret writes any secret to the canonical store and returns its name', async () => {
+    const { persistNamedSecret } = await loadModule();
+    const key = persistNamedSecret('MARKUS_HUB_TOKEN', 'hub-token-value');
+    expect(key).toBe('MARKUS_HUB_TOKEN');
+    expect(readFileSync(join(tmpHome, '.env'), 'utf-8')).toContain('MARKUS_HUB_TOKEN=hub-token-value');
+    expect(process.env['MARKUS_HUB_TOKEN']).toBe('hub-token-value');
+  });
+
+  it('readNamedSecret reads the canonical store; clearNamedSecret removes it', async () => {
+    const { persistNamedSecret, readNamedSecret, clearNamedSecret } = await loadModule();
+    persistNamedSecret('MARKUS_REMOTE_SECRET_EP_1', 'sekret');
+    expect(readNamedSecret('MARKUS_REMOTE_SECRET_EP_1')).toBe('sekret');
+    clearNamedSecret('MARKUS_REMOTE_SECRET_EP_1');
+    expect(readNamedSecret('MARKUS_REMOTE_SECRET_EP_1')).toBe('');
+  });
+
+  it('persistProviderSecret routes through the one write path (markus.json is never written)', async () => {
+    const { persistProviderSecret } = await loadModule();
+    persistProviderSecret('openai', 'sk-secret-value');
+    // The only file touched is the canonical .env — no markus.json is created.
+    expect(existsSync(join(tmpHome, 'markus.json'))).toBe(false);
+  });
 });
