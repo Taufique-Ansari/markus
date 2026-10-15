@@ -1,286 +1,219 @@
 # Remote Access Guide
 
-This guide covers how to make your local Markus instance accessible from the internet — for remote team collaboration, external agent (OpenClaw) integration, or mobile access.
+> **Architecture v2 — "bring your own tunnel".** Earlier versions routed all remote
+> traffic through a single Markus-operated VPS (signal server + TURN + in-band
+> HTTP/WS proxy). That is gone. Your tunnel carries the data; Markus Hub only
+> provides the **entry domain**, an **endpoint registry**, and a **login gate**.
+>
+> Normative interface: [`docs/design/remote-access-contract.md`](../design/remote-access-contract.md) (frozen, T1).
+> Shared types: `packages/remote/src/contract.ts`. UI logic: `packages/web-ui/src/lib/remoteAccess.ts`.
 
 ---
 
-## Quick Comparison
+## 0. What changed
 
-| Method | Setup Time | Requires Domain | Requires Public Server | Security | Best For |
-|--------|-----------|-----------------|----------------------|----------|----------|
-| **Cloudflare Tunnel** | 5 min | Yes (free) | No | High (built-in WAF + DDoS) | Recommended default |
-| **Tailscale** | 3 min | No | No | Very High (WireGuard mesh) | Private team access |
-| **FRP** | 15 min | Optional | Yes (need a VPS) | Medium | China mainland, self-hosted |
-| **ngrok** | 2 min | No | No | Medium | Quick demos / testing |
+| | Old (v1) | New (v2) |
+|---|---|---|
+| Data path | through our Relay/TURN VPS | **your own tunnel** (Cloudflare / Tailscale / your proxy) |
+| Cost/quality | on us, single choke point | on the tunnel provider's free tier; scales with you |
+| Public address | our relay | a tunnel hostname you own or get for free |
+| Hub's job | signal + relay + proxy | entry domain + endpoint registry + auth gate |
+| Public entry | relay URL | `https://{user}.remote.markus.global` → **302** to your tunnel after login |
+
+The remote access section of the app is now an **onboarding wizard**: pick a
+method, run (or delegate) the setup, watch six steps, then share a ready link.
 
 ---
 
-## Option 1: Cloudflare Tunnel (Recommended)
+## 1. Architecture
 
-Zero-trust tunnel — no open inbound ports, free HTTPS, built-in DDoS protection. Works with WebSocket out of the box.
+```
+Your phone / laptop
+        │  1. open  https://{user}.remote.markus.global
+        ▼
+Markus Hub  ── 2. login gate (Hub session cookie, Domain=.markus.global)
+        │
+        │  3. 302 redirect → your registered public URL
+        ▼
+Your tunnel  (cloudflared / tailscale / your proxy)
+        │
+        ▼
+Your local Markus  (http://127.0.0.1:8056, the local api-server)
+```
 
-### Prerequisites
+* **No traffic passes through Markus servers.** Hub never proxies the data — it
+  answers one request with a `302`.
+* **Hub keeps an endpoint registry** (`remote_endpoints`): which local install
+  owns which public URL, health, and a server-side encrypted secret used to
+  verify ownership. The local agent registers on startup and on address change.
+* **Ownership is proven** with a challenge–response handshake (the Hub calls your
+  tunnel at `verifyPath` and expects the `verifyToken`), with strict SSRF
+  protection on the target address.
 
-- A domain name (can use a free one via Cloudflare registrar)
-- A free Cloudflare account
+---
 
-### Setup
+## 2. Connection methods
+
+The wizard shows every method with **门槛 / 稳定性 / 账号? / 域名?** badges and a
+live **binary-detected ✓** marker (`cloudflared` / `tailscale` found on this
+machine).
+
+| Method | Public address | Account | Domain needed | Setup | Stability |
+|---|---|---|---|---|---|
+| **Cloudflare Quick Tunnel** | random `*.trycloudflare.com` | no | no | easy | address changes on restart |
+| **Cloudflare Named Tunnel** ★ | your own domain | yes | yes | moderate | stable |
+| **Tailscale Funnel** | `*.ts.net` (public) | yes | no | easy | stable |
+| **Tailscale Serve** | tailnet only (not public) | yes | no | easy | stable |
+| **Custom relay / proxy** | whatever you run (frp, ngrok, nginx…) | — | — | advanced | depends on you |
+
+★ **Recommended for long-term use** — a named tunnel gives you a stable address.
+
+> **Mainland China:** Cloudflare and Tailscale free tiers can be unstable.
+> A self-hosted **FRP** relay is usually the better choice there.
+
+---
+
+## 3. Setup — path A: run it yourself
+
+Choose a method, then copy the commands for your platform (the wizard offers
+macOS / Linux / Windows). When they are running, click **"I've run it"**.
+
+### 3.1 Cloudflare Quick Tunnel (fastest to try)
 
 ```bash
-# 1. Install cloudflared
-# macOS
-brew install cloudflared
-# Linux
-curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
-chmod +x /usr/local/bin/cloudflared
+brew install cloudflared                      # macOS
+# or: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+cloudflared tunnel --url http://127.0.0.1:8056
+```
 
-# 2. Authenticate with Cloudflare
+`cloudflared` prints an `https://<random>.trycloudflare.com` URL. The wizard
+picks it up, registers it, verifies it, and turns **Ready**.
+
+> The random hostname changes every restart — Markus detects the change and
+> updates the registry automatically (the entry link stays the same).
+
+### 3.2 Cloudflare Named Tunnel (stable, recommended)
+
+```bash
 cloudflared tunnel login
-
-# 3. Create a tunnel
 cloudflared tunnel create markus
-
-# 4. Route your subdomain to the tunnel
-cloudflared tunnel route dns markus markus.yourdomain.com
-
-# 5. Create config file
-mkdir -p ~/.cloudflared
-cat > ~/.cloudflared/config.yml << 'EOF'
-tunnel: markus
-credentials-file: ~/.cloudflared/<TUNNEL_ID>.json
-
-ingress:
-  - hostname: markus.yourdomain.com
-    service: http://localhost:8056
-  - service: http_status:404
-EOF
-
-# 6. Run the tunnel
-cloudflared tunnel run markus
+cloudflared tunnel route dns markus markus.example.com
+cloudflared tunnel run --url http://127.0.0.1:8056 markus
 ```
 
-### Run as a System Service (Recommended)
+You now have a **fixed** hostname on your own domain.
+
+### 3.3 Tailscale Funnel (public, stable)
 
 ```bash
-# Install as a system service so it auto-starts
-sudo cloudflared service install
-```
-
-### Access Markus
-
-Once the tunnel is running, visit `https://markus.yourdomain.com` from anywhere.
-
-### Add Authentication with Cloudflare Access (Optional but Recommended)
-
-1. Go to [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/)
-2. Navigate to **Access > Applications > Add an application**
-3. Set the application domain to `markus.yourdomain.com`
-4. Add an authentication policy (e.g., email OTP, Google SSO, GitHub SSO)
-
-This adds a login page in front of your Markus instance — even before traffic reaches your server.
-
----
-
-## Option 2: Tailscale (Best for Private Teams)
-
-Creates a WireGuard-based mesh VPN. Every device gets a stable IP. No ports exposed to the public internet at all.
-
-### Setup
-
-```bash
-# 1. Install Tailscale on your server
-# macOS
-brew install tailscale
-# Linux
-curl -fsSL https://tailscale.com/install.sh | sh
-
-# 2. Start and authenticate
-sudo tailscale up
-
-# 3. Note your Tailscale IP
-tailscale ip -4
-# e.g., 100.64.x.x
-
-# 4. Start Markus normally
-pnpm dev
-```
-
-### Access Markus
-
-Each team member installs Tailscale on their device and joins the same Tailnet. Then access:
-
-```
-http://100.64.x.x:8056    # API
-http://100.64.x.x:8057    # Web UI (dev mode)
-```
-
-### Enable HTTPS (Optional)
-
-```bash
-# Tailscale provides free HTTPS certificates for your machine name
-tailscale cert your-machine.tailnet-name.ts.net
-
-# Then access via:
-# https://your-machine.tailnet-name.ts.net:8056
-```
-
-### Share with External Users (Tailscale Funnel)
-
-```bash
-# Expose port 8056 to the public internet through Tailscale's infrastructure
+tailscale up
 tailscale funnel 8056
+# → https://<machine>.<tailnet>.ts.net
 ```
 
-This gives you a public URL like `https://your-machine.tailnet-name.ts.net/`.
-
----
-
-## Option 3: FRP (Best for China Mainland / Self-Hosted)
-
-If you have a VPS with a public IP (e.g., Alibaba Cloud, Tencent Cloud), FRP is a reliable and fast option.
-
-### Server Side (VPS with public IP)
+### 3.4 Tailscale Serve (private — tailnet only, no public exposure)
 
 ```bash
-# Download frps
-wget https://github.com/fatedier/frp/releases/latest/download/frp_0.61.1_linux_amd64.tar.gz
-tar xzf frp_*.tar.gz
-cd frp_*
-
-# Create frps config
-cat > frps.toml << 'EOF'
-bindPort = 7000
-auth.token = "your-secret-token-change-me"
-
-# Dashboard (optional)
-webServer.addr = "0.0.0.0"
-webServer.port = 7500
-webServer.user = "admin"
-webServer.password = "admin"
-
-vhostHTTPPort = 80
-vhostHTTPSPort = 443
-EOF
-
-# Run
-./frps -c frps.toml
+tailscale serve 8056
 ```
 
-### Client Side (Your Machine Running Markus)
+Nothing is published to the internet; only your own devices can reach it.
 
-```bash
-# Download frpc
-# macOS: brew install frpc
-# Or download from https://github.com/fatedier/frp/releases
+### 3.5 Custom relay (frp / ngrok / nginx)
 
-cat > frpc.toml << 'EOF'
-serverAddr = "your-vps-ip"
-serverPort = 7000
-auth.token = "your-secret-token-change-me"
-
-[[proxies]]
-name = "markus-api"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 8056
-remotePort = 8056
-
-[[proxies]]
-name = "markus-web"
-type = "tcp"
-localIP = "127.0.0.1"
-localPort = 8057
-remotePort = 8057
-EOF
-
-./frpc -c frpc.toml
-```
-
-### Access Markus
-
-```
-http://your-vps-ip:8056    # API
-http://your-vps-ip:8057    # Web UI
-```
-
-For HTTPS, add nginx with Let's Encrypt on your VPS as a reverse proxy.
+Run your own reverse proxy pointing at `http://127.0.0.1:8056`, then either let
+the wizard discover it, or use **"Enter address manually"** in the failure state
+and paste the public HTTPS URL. The Hub will verify it the same way.
 
 ---
 
-## Option 4: ngrok (Quick Testing)
+## 4. Setup — path B: let an Agent do it
 
-Simplest setup for temporary access. Not recommended for production.
-
-```bash
-# Install
-brew install ngrok   # macOS
-# or: snap install ngrok   # Linux
-
-# Authenticate (free account at ngrok.com)
-ngrok config add-authtoken <your-token>
-
-# Expose Markus API
-ngrok http 8056
-```
-
-ngrok gives you a random URL like `https://abc123.ngrok-free.app`. Share it for testing.
+Choose the method, then **"Let an Agent do it"**. An Agent installs the binary,
+starts the tunnel, and reports status back into the same wizard — you watch the
+same six steps. (Agent runtime lands in T10; until then the panel tells you it is
+unavailable and points you at path A.)
 
 ---
 
-## Security Checklist
-
-Before exposing Markus to the internet, ensure:
-
-- [ ] **Set the admin password** — either complete the onboarding wizard to set your own credentials, or set `ADMIN_PASSWORD` in your `.env` or `markus.json`. (If unset, a random bootstrap password is generated and printed once on first run — never ship a known default.)
-- [ ] **Set the gateway secret** — set `GATEWAY_SECRET` in your `.env`. (If unset, a random secret is generated and persisted to `~/.markus/gateway-secret`.)
-- [ ] **Set `JWT_SECRET`** — set it in your `.env` so all processes/restarts share one signing key. (If unset, a random secret is generated and persisted to `~/.markus/jwt-secret`.)
-- [ ] **Use HTTPS** — Cloudflare Tunnel and Tailscale provide this automatically; for FRP, add nginx + Let's Encrypt
-- [ ] **Enable authentication layer** — Cloudflare Access (free), Tailscale ACLs, or nginx basic auth in front
-- [ ] **Review CORS** — current default allows all origins (`*`); for production, restrict to your domain
-- [ ] **Firewall** — do not expose port 8056 directly to `0.0.0.0`; always use a tunnel or reverse proxy
-
-### Recommended Architecture
+## 5. The setup wizard (six steps)
 
 ```
-Internet
-    │
-    ▼
-┌─────────────────────────┐
-│  Cloudflare / Tailscale │  ← TLS termination + auth
-│  (Zero-trust tunnel)    │
-└────────────┬────────────┘
-             │ (localhost only)
-             ▼
-┌─────────────────────────┐
-│  Markus API (:8056)     │  ← HTTP + WebSocket
-│  Markus Web UI (:8057)  │  ← Vite dev / static files
-└─────────────────────────┘
+install → start → resolve address → register → verify → ready
 ```
+
+| Step | What happens |
+|---|---|
+| **Install** | the binary is present (or you installed it) |
+| **Start** | the tunnel process is running |
+| **Resolve address** | the public URL is parsed from the tunnel's output |
+| **Register** | the endpoint is written to the Hub registry |
+| **Verify** | Hub proves ownership (challenge–response) and checks SSRF safety |
+| **Ready** | you can share the link |
+
+Status arrives live over the WebSocket (`remote:status`), so the wizard advances
+without a page refresh.
 
 ---
 
-## External Agent (OpenClaw) Gateway Access
+## 6. Ready panel
 
-If you need external AI agents to connect to your Markus instance:
+Once ready, the panel shows two things — **they are different addresses**:
 
-1. Expose only the API port (8056) via your chosen tunnel method
-2. Set a strong `GATEWAY_SECRET` in your environment
-3. External agents register via `POST /api/gateway/register` and authenticate via `POST /api/gateway/auth`
-4. All gateway communication uses HMAC-SHA256 signed Bearer tokens with 24-hour expiry
-5. See [API Reference](../api/api.md) for full gateway endpoint documentation
+* **Share this entry** — `https://{user}.remote.markus.global`
+  Give **this** to people. It needs a Hub login and is protected by the auth
+  gate. Copy button + QR code included.
+* **Actual tunnel address** — your real tunnel hostname (e.g. `*.trycloudflare.com`).
+  This is what the `302` redirects *to*. After login, your browser's address bar
+  will show **this** domain, not `remote.markus.global` — that is expected.
+
+Liveness is shown as **● Online / Degraded / ({{ms}} ms latency)**, with three
+actions: **[Restart] [Rotate address] [Turn off]**.
 
 ---
 
-## FAQ
+## 7. Abnormal states
 
-**Q: Can I run Markus on a cloud VPS directly?**
-A: Yes. Install with the official one-liner (`curl -fsSL https://markus.global/install.sh | bash`) or the desktop/CLI packages, then put nginx or Caddy in front for HTTPS. No tunnel needed since the VPS already has a public IP.
+The wizard never fails silently.
 
-**Q: Which option works best in China?**
-A: FRP with a domestic cloud VPS (Alibaba Cloud / Tencent Cloud). Cloudflare and Tailscale may have connectivity issues behind the GFW.
+| Symptom | What you see | What to do |
+|---|---|---|
+| Tunnel dropped after being ready | **"Reconnecting…"** (auto-retry, page updates on recovery) | wait; or **Restart** |
+| Verification failed | explicit reason + **Retry** + **Enter address manually** | retry, or paste the URL if discovery got it wrong |
+| Address unreachable / blocked | reason `unreachable` + hint | your network may block it — **switch method** |
+| Token mismatch | reason spelled out | the address may belong to someone else — re-run setup |
+| `cloudflared`/`tailscale` missing | badge shows **not found**, commands warn | run the install command first |
 
-**Q: Can I combine Tailscale + Cloudflare?**
-A: Yes. Use Tailscale for daily team access (zero-config, fast), and Cloudflare Tunnel for public-facing endpoints (external agents, webhooks).
+Verification failure reasons surface verbatim from the contract
+(`verifyReasonUnreachable`, `non_https`, `blocked_target`, `too_many_redirects`,
+`response_too_large`, `token_mismatch`, `malformed_response`).
 
-**Q: Do I need a domain name?**
-A: Only for Cloudflare Tunnel. Tailscale, FRP, and ngrok work without one.
+---
+
+## 8. Security boundary — **read this**
+
+A tunnel exposes your local Markus **directly to the internet**. The entry gate
+protects the *entry domain*; anyone who learns your **tunnel address** reaches
+Markus directly. Treat it as a public server:
+
+1. **Always set a password** on your local Markus before exposing it.
+2. **Put an identity layer in front of the tunnel** — strongly recommended:
+   * **Cloudflare Access** (Zero Trust) for cloudflared tunnels, or
+   * **Tailscale ACLs**, or use **Tailscale Serve** (tailnet-only, not public).
+3. Keep `cloudflared` / `tailscale` updated; rotate the tunnel if you suspect a leak.
+4. The Hub stores only an **encrypted secret** (server-side) to verify you own the
+   endpoint — it never receives your traffic or your data.
+
+---
+
+## 9. Honest limits
+
+* **The address bar jumps to your tunnel domain** after login. The pretty entry
+  link is a front door, not the room.
+* **Free tunnels are rate-limited** and are not meant for heavy traffic.
+* **Quick tunnels change hostname on restart.** We auto-sync the registry, but
+  anyone you gave the *tunnel* address (not the entry link) will need the new one.
+* **Mainland China:** Cloudflare/Tailscale free tiers may be unstable — use FRP.
+* The legacy WebRTC relay path is retained only as a migration fallback for
+  existing installs; it is not offered for new setups.
+

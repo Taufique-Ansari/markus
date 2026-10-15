@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
-import { api, type StorageInfo, type OrphanInfo, type AuthUser, type HumanUserInfo, type RemoteStatus, type CatalogModel, hubApi, getHubUser, getHubToken, ensureHubAuth, wsClient } from '../api.ts';
+import { api, type StorageInfo, type OrphanInfo, type AuthUser, type HumanUserInfo, type CatalogModel, hubApi, getHubUser, getHubToken, ensureHubAuth } from '../api.ts';
 import { THEME_OPTIONS, type ThemeMode } from '../hooks/useTheme.ts';
 import { SUPPORTED_LANGUAGES } from '../i18n/index.ts';
 import { navBus } from '../navBus.ts';
@@ -16,6 +16,7 @@ import { ModelRoutingSection } from '../components/ModelRoutingSection.tsx';
 import { PerAgentModelSection } from '../components/PerAgentModelSection.tsx';
 import { useProviderCatalog } from '../constants/providers.ts';
 import { InstancesSection } from '../components/integrations/InstancesSection.tsx';
+import { RemoteAccessSection } from '../components/RemoteAccessSection.tsx';
 import { FilterableSelect } from '../components/FilterableSelect.tsx';
 // import { CodingToolsSettings } from './CodingToolsSettings.tsx'; // TEMP-HIDDEN (2026-08)
 import { WebSearchSettings } from './WebSearchSettings.tsx';
@@ -54,7 +55,7 @@ type SettingsTab = 'appearance' | 'providers' | 'execution' | 'browser' | 'searc
 interface SettingsTabDef { id: SettingsTab; labelKey: string; adminOnly?: boolean }
 
 /** Module-scoped — used by Settings page and CollapsibleAvailableModels. */
-const SETTINGS_TABS: SettingsTabDef[] = [
+export const SETTINGS_TABS: SettingsTabDef[] = [
   { id: 'appearance', labelKey: 'nav.appearance' },
   { id: 'storage', labelKey: 'nav.storage', adminOnly: true },
   { id: 'providers', labelKey: 'nav.providers', adminOnly: true },
@@ -63,14 +64,15 @@ const SETTINGS_TABS: SettingsTabDef[] = [
   // { id: 'coding-tools', labelKey: 'nav.codingTools', adminOnly: true },
   { id: 'search', labelKey: 'nav.search', adminOnly: true },
   { id: 'integrations', labelKey: 'nav.integrations', adminOnly: true },
+  { id: 'remote', labelKey: 'nav.remote', adminOnly: true },
   { id: 'account', labelKey: 'nav.account' },
 ];
 
-const SETTINGS_TAB_GROUPS: Array<{ labelKey: string; tabs: SettingsTab[] }> = [
+export const SETTINGS_TAB_GROUPS: Array<{ labelKey: string; tabs: SettingsTab[] }> = [
   { labelKey: 'nav.group.general', tabs: ['appearance', 'storage'] },
   { labelKey: 'nav.group.aiConfig', tabs: ['providers', 'execution'] },
   { labelKey: 'nav.group.tools', tabs: ['browser', 'search'] },
-  { labelKey: 'nav.group.connections', tabs: ['integrations'] },
+  { labelKey: 'nav.group.connections', tabs: ['integrations', 'remote'] },
   { labelKey: 'nav.group.account', tabs: ['account'] },
 ];
 
@@ -108,6 +110,7 @@ const SETTINGS_TAB_ICONS: Record<string, string> = {
   'coding-tools': 'M16 18l6-6-6-6 M8 6l-6 6 6 6',
   search: 'M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.3-4.3',
   integrations: 'M9 17H7A5 5 0 0 1 7 7h2 M15 7h2a5 5 0 1 1 0 10h-2 M8 12h8',
+  remote: 'M2 8.5a15 15 0 0 1 20 0 M5 12a10 10 0 0 1 14 0 M8.5 15.5a5 5 0 0 1 7 0 M12 19h.01',
   account: 'M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2 M12 7a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z',
   _default: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
 };
@@ -120,11 +123,15 @@ function SettingsTabIcon({ id, className }: { id: string; className?: string }) 
   );
 }
 
-const LEGACY_TAB_ALIASES: Record<string, SettingsTab> = { users: 'account', organization: 'account', license: 'account', remote: 'account' };
+const LEGACY_TAB_ALIASES: Record<string, SettingsTab> = { users: 'account', organization: 'account', license: 'account' };
 
-function getSettingsTab(): SettingsTab | null {
-  const hash = window.location.hash.slice(1);
-  const parts = hash.split('/');
+/**
+ * Pure hash → tab resolver. `hash` may carry a leading `#` (as `window.location.hash`
+ * does) — the shell is stripped here so tests can call it without a DOM.
+ */
+export function resolveSettingsTab(hash: string): SettingsTab | null {
+  const clean = hash.startsWith('#') ? hash.slice(1) : hash;
+  const parts = clean.split('/');
   if (parts[0] === 'settings' && parts[1]) {
     const raw = parts[1] as string;
     const mapped = LEGACY_TAB_ALIASES[raw] ?? raw;
@@ -132,6 +139,10 @@ function getSettingsTab(): SettingsTab | null {
     if (SETTINGS_TABS.some(t => t.id === tab)) return tab;
   }
   return null;
+}
+
+function getSettingsTab(): SettingsTab | null {
+  return resolveSettingsTab(window.location.hash);
 }
 
 export function Settings({ theme, onThemeChange, authUser, onLogout, onUserUpdated }: { theme?: ThemeMode; onThemeChange?: (m: ThemeMode) => void; authUser?: AuthUser; onLogout?: () => void; onUserUpdated?: (u: AuthUser) => void } = {}) {
@@ -3627,282 +3638,10 @@ function OrphanSection({ orphanInfo, dataDir, onPurged, formatBytes: formatBytes
   );
 }
 
-/* ─── Remote Access ─── */
-
-function RemoteAccessSection() {
-  const { t } = useTranslation(['settings', 'common']);
-  const [status, setStatus] = useState<RemoteStatus | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [toggling, setToggling] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const hubUser = getHubUser();
-
-  const loadStatus = useCallback(async () => {
-    try {
-      const s = await api.settings.getRemote();
-      setStatus(s);
-    } catch {
-      setStatus(null);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { loadStatus(); }, [loadStatus]);
-
-  useEffect(() => {
-    return wsClient.on('remote:status', (event) => {
-      const payload = event.payload as unknown as RemoteStatus | undefined;
-      if (payload) {
-        setStatus(payload);
-        setToggling(false);
-      }
-    });
-  }, []);
-
-  const handleToggle = async () => {
-    setToggling(true);
-    setError(null);
-    try {
-      if (status?.enabled) {
-        await api.settings.disableRemote();
-        await loadStatus();
-        setToggling(false);
-      } else {
-        if (!hubApi.isAuthenticated()) {
-          await ensureHubAuth();
-        }
-        await api.settings.enableRemote();
-      }
-    } catch (err) {
-      setError(String(err instanceof Error ? err.message : err));
-      setToggling(false);
-    }
-  };
-
-  const handleLogin = async () => {
-    try {
-      await ensureHubAuth();
-      await loadStatus();
-    } catch { /* user cancelled */ }
-  };
-
-  const handleCopy = () => {
-    if (!status?.remoteUrl) return;
-    navigator.clipboard.writeText(status.remoteUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const isConnecting = toggling || (status?.enabled && !status?.connected && status?.state !== 'idle');
-  const qrUrl = status?.remoteUrl ?? null;
-
-  return (
-    <Section title={t('settings:remoteAccess.title')}>
-      <div className="space-y-4">
-        <p className="text-sm text-content-secondary">
-          {t('settings:remoteAccess.description')}
-        </p>
-
-        {/* Hub Auth Status */}
-        {!hubApi.isAuthenticated() ? (
-          <div className="flex items-center gap-3 p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
-            <svg className="w-5 h-5 text-amber-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span className="text-sm text-amber-600 dark:text-amber-400">
-              {t('settings:remoteAccess.loginRequired')}
-            </span>
-            <button
-              onClick={handleLogin}
-              className="ml-auto px-3 py-1.5 text-xs font-medium bg-brand-600 hover:bg-brand-500 text-white rounded-lg transition-colors"
-            >
-              {t('settings:remoteAccess.signIn')}
-            </button>
-          </div>
-        ) : (
-          <div className="flex items-center gap-2 text-sm text-content-secondary">
-            <span className="w-2 h-2 rounded-full bg-green-500" />
-            {t('settings:remoteAccess.signedInAs')} <strong>{hubUser?.username ?? hubUser?.displayName}</strong>
-          </div>
-        )}
-
-        {/* Toggle + Status */}
-        {hubApi.isAuthenticated() && (
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <Switch
-                  checked={status?.enabled === true}
-                  onChange={() => void handleToggle()}
-                  label={t('settings:remoteAccess.enabled')}
-                  size="lg"
-                  disabled={toggling || loading}
-                />
-                <span className="text-sm font-medium">
-                  {isConnecting
-                    ? t('settings:remoteAccess.connecting')
-                    : status?.enabled
-                      ? t('settings:remoteAccess.enabled')
-                      : t('settings:remoteAccess.disabled')}
-                </span>
-                {isConnecting && <Spinner />}
-              </div>
-
-              {status?.enabled && (
-                <div className={`flex items-center gap-1.5 text-xs ${
-                  status.connected
-                    ? 'text-green-600 dark:text-green-400'
-                    : (status.state === 'registering' || status.state === 'connecting')
-                      ? 'text-blue-600 dark:text-blue-400'
-                      : 'text-amber-600 dark:text-amber-400'
-                }`}>
-                  <span className={`w-2 h-2 rounded-full ${
-                    status.connected
-                      ? 'bg-green-500 animate-pulse'
-                      : (status.state === 'registering' || status.state === 'connecting')
-                        ? 'bg-blue-500 animate-pulse'
-                        : 'bg-amber-500'
-                  }`} />
-                  {status.connected
-                    ? t('settings:remoteAccess.connected')
-                    : (status.state === 'registering')
-                      ? t('settings:remoteAccess.registering')
-                      : (status.state === 'connecting')
-                        ? t('settings:remoteAccess.connecting')
-                        : t('settings:remoteAccess.disconnected')}
-                  {status.connected && status.peerCount > 0 && (
-                    <> &middot; {t('settings:remoteAccess.peerCount', { count: status.peerCount })}</>
-                  )}
-                  {(status.state === 'registering' || status.state === 'connecting') && <Spinner />}
-                </div>
-              )}
-            </div>
-
-            {error && (
-              <div className="p-2 rounded-lg bg-red-500/10 text-red-500 text-sm">{error}</div>
-            )}
-
-            {/* Connected Peers List */}
-            {status?.enabled && status.peers && status.peers.length > 0 && (
-              <div className="p-4 rounded-lg bg-surface-elevated border border-border-default space-y-2">
-                <label className="text-xs text-content-tertiary uppercase tracking-wider">
-                  {t('settings:remoteAccess.connectedPeers')}
-                </label>
-                <div className="space-y-2 mt-1">
-                  {status.peers.map((peer) => (
-                    <div key={peer.peerId} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-surface-inset">
-                      <span className={`w-2 h-2 rounded-full shrink-0 ${
-                        peer.transport === 'p2p' ? 'bg-green-500' : peer.transport === 'relay' ? 'bg-blue-500' : 'bg-amber-500 animate-pulse'
-                      }`} />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-sm font-mono text-content-primary truncate">
-                          {peer.peerId.slice(0, 8)}...
-                        </div>
-                        <div className="text-xs text-content-tertiary">
-                          {t('settings:remoteAccess.connectedSince', { time: new Date(peer.connectedAt).toLocaleTimeString() })}
-                        </div>
-                      </div>
-                      <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
-                        peer.transport === 'p2p'
-                          ? 'bg-green-500/10 text-green-600 dark:text-green-400'
-                          : peer.transport === 'relay'
-                            ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400'
-                            : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
-                      }`}>
-                        {peer.transport === 'p2p' ? 'P2P' : peer.transport === 'relay' ? 'Relay' : t('settings:remoteAccess.peerConnecting')}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Remote URL + QR Code */}
-            {status?.enabled && status.remoteUrl && (
-              <div className="p-4 rounded-lg bg-surface-elevated border border-border-default space-y-3">
-                <div>
-                  <label className="text-xs text-content-tertiary uppercase tracking-wider">
-                    {t('settings:remoteAccess.url')}
-                  </label>
-                  <div className="flex items-center gap-2 mt-1">
-                    <code className="flex-1 px-3 py-1.5 text-sm bg-surface-inset rounded font-mono truncate">
-                      {status.remoteUrl}
-                    </code>
-                    <button
-                      onClick={handleCopy}
-                      className={`px-2 py-1.5 text-xs border rounded transition-colors ${
-                        copied
-                          ? 'border-green-500 text-green-600 dark:text-green-400'
-                          : 'border-border-default hover:bg-surface-elevated'
-                      }`}
-                    >
-                      {copied ? t('settings:remoteAccess.copied') : t('settings:remoteAccess.copy')}
-                    </button>
-                  </div>
-                </div>
-
-                {qrUrl && (
-                  <div>
-                    <label className="text-xs text-content-tertiary uppercase tracking-wider">
-                      {t('settings:remoteAccess.qrCode')}
-                    </label>
-                    <p className="text-xs text-content-secondary mt-0.5 mb-2">
-                      {t('settings:remoteAccess.scanQr')}
-                    </p>
-                    <QRCode url={qrUrl} />
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    </Section>
-  );
-}
-
-function Spinner() {
-  return (
-    <svg className="w-4 h-4 animate-spin text-content-secondary" viewBox="0 0 24 24" fill="none">
-      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-    </svg>
-  );
-}
-
-function QRCode({ url }: { url: string }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [error, setError] = useState(false);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    setError(false);
-
-    import('qrcode').then((QRLib) => {
-      QRLib.toCanvas(canvas, url, {
-        width: 200,
-        margin: 2,
-        color: { dark: '#000000', light: '#ffffff' },
-        errorCorrectionLevel: 'M',
-      });
-    }).catch(() => setError(true));
-  }, [url]);
-
-  if (error) {
-    return (
-      <a href={url} target="_blank" rel="noopener" className="text-sm text-brand-500 underline">{url}</a>
-    );
-  }
-
-  return (
-    <div className="inline-block p-2 bg-white rounded-lg">
-      <canvas ref={canvasRef} className="block" style={{ width: 160, height: 160 }} />
-    </div>
-  );
-}
+/* ─── Remote Access ───
+ * The tunnel-based onboarding wizard lives in
+ * `components/RemoteAccessSection.tsx` (T9). Logic + state machine:
+ * `lib/remoteAccess.ts`. */
 
 /* ─── Account (Organization & License + Local Markus) ─── */
 

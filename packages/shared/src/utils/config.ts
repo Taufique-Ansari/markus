@@ -3,6 +3,23 @@ import { resolve } from 'node:path';
 import type { CapabilityRoutingConfig } from '../types/model-catalog.js';
 import { markusConfigPath } from './config-paths.js';
 
+/**
+ * Tunnel channels a user can choose for remote access (`config.remote.mode`).
+ *
+ * WHY it lives here: `@markus/shared` sits BELOW `@markus/remote` in the
+ * dependency graph, so it cannot import the frozen `REMOTE_ENDPOINT_KINDS` from
+ * the remote contract. This list must stay byte-identical to that constant; a
+ * drift guard (`packages/remote/test/remote-config-modes.test.ts`) asserts it.
+ */
+export const REMOTE_TUNNEL_MODES = [
+  'cloudflare_quick',
+  'cloudflare_named',
+  'tailscale_funnel',
+  'tailscale_serve',
+  'custom',
+] as const;
+export type RemoteTunnelMode = (typeof REMOTE_TUNNEL_MODES)[number];
+
 export interface MarkusConfig {
   org: {
     id: string;
@@ -180,6 +197,22 @@ export interface MarkusConfig {
     autoConnect?: boolean;
     hubUrl?: string;
     instanceName?: string;
+    // ── Tunnel intent + pointer (T8) ──────────────────────────────────────
+    // This block holds the user's INTENT and a pointer only. The authoritative
+    // endpoint state lives in the Hub registry (`/api/remote/endpoints`); the
+    // local side never keeps a second copy. Secrets (endpoint rotation secret /
+    // Hub token) NEVER land here — they go to `~/.markus/.env` via
+    // `provider-secrets.ts`.
+    /** Chosen tunnel channel. Unset → legacy WebRTC relay (grey-release fallback). */
+    mode?: RemoteTunnelMode;
+    /** Port the tunnel points at. Defaults to `server.apiPort ?? 8056`. */
+    localPort?: number;
+    /** Id of the currently active endpoint (authoritative status stays on the Hub). */
+    activeEndpointId?: string;
+    /** Own domain — required for `cloudflare_named` / `custom`. */
+    hostname?: string;
+    /** Explicit opt-in to the legacy WebRTC relay path (the grey-release fallback switch). */
+    legacyRelay?: boolean;
   };
   network?: {
     /** HTTP/HTTPS proxy URL for outbound requests (e.g. "http://127.0.0.1:7890") */
